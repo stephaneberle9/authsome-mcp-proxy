@@ -1,0 +1,71 @@
+name: Run unlocked install smoke test
+
+# uv.lock never reaches users: a wheel carries only its declared constraints, so
+# `uvx authsome-mcp-proxy` resolves the newest versions those allow. Locked CI
+# stays green while such an install breaks, e.g. when a dependency ships a new
+# major that a missing upper bound lets in. This job installs the built wheel
+# the way users do, without the lock, and checks that the package still loads.
+
+env:
+  # Enable colored output
+  PY_COLORS: 1
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - ".github/workflows/**"
+
+  pull_request:
+
+  # Upstream releases break unlocked installs without any commit here, so a
+  # push trigger alone would only notice at the next unrelated change.
+  schedule:
+    - cron: "0 5 * * *"
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  smoke_test:
+    name: "Smoke test unlocked install: Python ${{ matrix.python-version }}"
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10"]
+      fail-fast: false
+    timeout-minutes: 5
+
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # uv-dynamic-versioning derives the version from git tags
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Build wheel
+        run: uv build --wheel -o dist
+
+      - name: Import every module from an unlocked install
+        # --help alone would miss modules that __main__ imports lazily
+        run: |
+          uv run --no-project --isolated --with dist/*.whl python -c '
+          import importlib, pkgutil
+          from importlib.metadata import version
+          import authsome_mcp_proxy as pkg
+          for m in pkgutil.iter_modules(pkg.__path__, pkg.__name__ + "."):
+              importlib.import_module(m.name)
+          print("resolved:", *(f"{d} {version(d)}" for d in ("fastmcp", "mcp", "httpx")))
+          '
+
+      - name: Run the CLI from an unlocked install
+        run: uv run --no-project --isolated --with dist/*.whl authsome-mcp-proxy --help
