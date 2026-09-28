@@ -18,7 +18,11 @@ dependencies = [
     # Claude client will ever select. The value is still hardcoded without "none"
     # a layer down, in the MCP SDK's build_metadata() (python-sdk#2260, fix
     # unmerged in #2261); fastmcp patches over it, so the floor belongs here.
-    "fastmcp>=3.4.3",
+    # Capped below 4: fastmcp 4 requires mcp 2.x and moves its HTTP stack from
+    # httpx to the httpx2 distribution, which the outbound auth classes here are
+    # not written against -- they are httpx.Auth subclasses handed to a fastmcp
+    # Client. Lift once this package is ported to httpx2 and the mcp 2.x API.
+    "fastmcp>=3.4.3,<4",
     "py-key-value-aio[disk]>=0.3.0",
     # Both arrive transitively via fastmcp, but web mode imports them directly --
     # starlette for the ASGI types the host router is written against, uvicorn to
@@ -33,13 +37,20 @@ dependencies = [
     # Likewise transitive-but-imported-directly. Floors match what the chain
     # already enforces (fastmcp -> httpx>=0.28.1, exceptiongroup>=1.2.2,
     # mcp>=1.24.0, pydantic>=2.11.7; mcp -> anyio>=4.9), so none of these
-    # narrows resolution. Upper bounds are deliberately omitted: fastmcp
-    # already caps httpx and mcp, and duplicating a cap here would only get
-    # in the way when it lifts its own.
+    # narrows resolution. Upper bounds are omitted where fastmcp already caps
+    # the dependency (httpx), since duplicating a cap would only get in the way
+    # when it lifts its own.
+    #
+    # mcp is the exception: delegating its cap to fastmcp only holds while
+    # fastmcp itself is capped, and it was not -- so an unlocked install
+    # resolved fastmcp 4, hence mcp 2, and mcp 2 renamed McpError to MCPError.
+    # __main__ imports the 1.x spelling at module level, so every entry point
+    # died with an ImportError before it could speak MCP. Capped here as well as
+    # on fastmcp so the constraint names the symbol that actually broke.
     "anyio>=4.9",
     "exceptiongroup>=1.2.2",
     "httpx>=0.28.1",
-    "mcp>=1.24.0",
+    "mcp>=1.24.0,<2",
     "pydantic>=2.11.7",
 ]
 
