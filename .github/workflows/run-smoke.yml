@@ -64,7 +64,7 @@ jobs:
           import authsome_mcp_proxy as pkg
           for m in pkgutil.iter_modules(pkg.__path__, pkg.__name__ + "."):
               importlib.import_module(m.name)
-          print("resolved:", *(f"{d} {version(d)}" for d in ("fastmcp", "mcp", "httpx")))
+          print("resolved:", *(f"{d} {version(d)}" for d in ("fastmcp", "mcp", "httpx2")))
           '
 
       - name: Run the CLI from an unlocked install

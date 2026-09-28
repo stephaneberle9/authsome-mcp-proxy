@@ -8,21 +8,27 @@ authors = [
 ]
 requires-python = ">=3.10"
 dependencies = [
-    # 3.4.3 is the first release whose OAuthProxy advertises "none" (and
-    # private_key_jwt) in token_endpoint_auth_methods_supported once CIMD is on.
-    # That floor is load-bearing rather than cosmetic: Claude picks CIMD only when
-    # the authorization-server metadata carries both
-    # client_id_metadata_document_supported: true and "none" -- its CIMD client
-    # authenticates as a public client -- and silently falls back to DCR when
-    # either is missing. Below 3.4.3 the proxy therefore advertises CIMD that no
-    # Claude client will ever select. The value is still hardcoded without "none"
-    # a layer down, in the MCP SDK's build_metadata() (python-sdk#2260, fix
-    # unmerged in #2261); fastmcp patches over it, so the floor belongs here.
-    # Capped below 4: fastmcp 4 requires mcp 2.x and moves its HTTP stack from
-    # httpx to the httpx2 distribution, which the outbound auth classes here are
-    # not written against -- they are httpx.Auth subclasses handed to a fastmcp
-    # Client. Lift once this package is ported to httpx2 and the mcp 2.x API.
-    "fastmcp>=3.4.3,<4",
+    # The fastmcp floor is load-bearing twice over:
+    #
+    # - fastmcp 4 moved its HTTP stack from httpx to httpx2, and the outbound
+    #   auth classes here are httpx2.Auth subclasses handed to a fastmcp Client.
+    #   fastmcp 3's httpx client rejects them with TypeError: Invalid "auth"
+    #   argument -- when the upstream connection opens, not at import, so no
+    #   import smoke test notices.
+    # - Claude picks CIMD only when the authorization-server metadata carries
+    #   both client_id_metadata_document_supported: true and "none" in
+    #   token_endpoint_auth_methods_supported -- its CIMD client authenticates as
+    #   a public client -- and silently falls back to DCR when either is missing.
+    #   OAuthProxy advertises "none" since 3.4.3, so every 4.x has it. The value
+    #   is still hardcoded without "none" a layer down, in the MCP SDK's
+    #   build_metadata() (python-sdk#2260, fix unmerged in #2261); fastmcp
+    #   patches over it, so the floor belongs here.
+    # - 4.0.8 rather than 4.0.0 for OAuthProxy security fixes this proxy relies
+    #   on: 4.0.4 rejects ID-JAG tokens unless identity assertion is configured,
+    #   4.0.6 keeps Google access tokens out of request URLs, and 4.0.8 revokes
+    #   the upstream refresh token instead of sending the proxy's own token
+    #   upstream.
+    "fastmcp>=4.0.8",
     "py-key-value-aio[disk]>=0.3.0",
     # Both arrive transitively via fastmcp, but web mode imports them directly --
     # starlette for the ASGI types the host router is written against, uvicorn to
@@ -35,23 +41,18 @@ dependencies = [
     "starlette>=0.27",
     "uvicorn>=0.35",
     # Likewise transitive-but-imported-directly. Floors match what the chain
-    # already enforces (fastmcp -> httpx>=0.28.1, exceptiongroup>=1.2.2,
-    # mcp>=1.24.0, pydantic>=2.11.7; mcp -> anyio>=4.9), so none of these
-    # narrows resolution. Upper bounds are omitted where fastmcp already caps
-    # the dependency (httpx), since duplicating a cap would only get in the way
-    # when it lifts its own.
+    # already enforces (fastmcp-slim -> httpx2>=2.5.0, exceptiongroup>=1.2.2,
+    # mcp>=2.0.0, pydantic>=2.12.0; mcp -> anyio>=4.9), so none of these
+    # narrows resolution.
     #
-    # mcp is the exception: delegating its cap to fastmcp only holds while
-    # fastmcp itself is capped, and it was not -- so an unlocked install
-    # resolved fastmcp 4, hence mcp 2, and mcp 2 renamed McpError to MCPError.
-    # __main__ imports the 1.x spelling at module level, so every entry point
-    # died with an ImportError before it could speak MCP. Capped here as well as
-    # on fastmcp so the constraint names the symbol that actually broke.
+    # mcp 2.0 is load-bearing in its own right: it renamed McpError to MCPError,
+    # which __main__ imports at module level, so mcp 1.x would turn every entry
+    # point into an ImportError.
     "anyio>=4.9",
     "exceptiongroup>=1.2.2",
-    "httpx>=0.28.1",
-    "mcp>=1.24.0,<2",
-    "pydantic>=2.11.7",
+    "httpx2>=2.5.0",
+    "mcp>=2.0.0",
+    "pydantic>=2.12.0",
 ]
 
 [dependency-groups]

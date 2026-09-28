@@ -14,7 +14,7 @@ moving the flag: CIMD is in beta upstream.
 
 from unittest.mock import patch
 
-import httpx
+import httpx2
 import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.oidc_proxy import OIDCConfiguration, OIDCProxy
@@ -86,8 +86,8 @@ def _app(*, enable_cimd: bool, config: WebConfig | None = None):
 
 
 async def _metadata(app) -> dict:
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url=BASE_URL
+    async with httpx2.AsyncClient(
+        transport=httpx2.ASGITransport(app=app), base_url=BASE_URL
     ) as client:
         response = await client.get(AS_METADATA_PATH)
     response.raise_for_status()
@@ -145,9 +145,9 @@ async def test_cimd_advertises_public_client_token_auth(build_config):
     Claude selects CIMD only when the metadata *also* offers ``none`` in
     ``token_endpoint_auth_methods_supported`` -- its CIMD client authenticates as
     a public client -- and falls back to DCR when that is missing. FastMCP adds
-    ``none`` and ``private_key_jwt`` on the CIMD branch of ``get_routes()``,
-    which is what the ``fastmcp>=3.4.3`` floor in ``pyproject.toml`` buys: on
-    3.3.1 the proxy advertised CIMD that no Claude client would ever select.
+    ``none`` and ``private_key_jwt`` on the CIMD branch of ``get_routes()``
+    since 3.4.3 (every 4.x has it too): on 3.3.1 the proxy advertised CIMD
+    that no Claude client would ever select.
 
     Asserted over ASGI rather than against the floor, because the floor is the
     means and this is the end. Only the positive is asserted: with CIMD off,

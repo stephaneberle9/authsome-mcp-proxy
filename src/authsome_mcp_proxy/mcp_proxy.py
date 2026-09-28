@@ -291,25 +291,28 @@ def _server_identity_kwargs(config: WebConfig) -> dict[str, Any]:
 def _relay_server_info(client: Client) -> dict[str, Any]:
     """Extract the upstream MCP server's identity so the proxy appears transparent.
 
-    Reads name/version/website_url/icons from ``serverInfo`` (shown in the
+    Reads name/version/website_url/icons from the server info (shown in the
     Claude Desktop connector list) and ``instructions`` (influences how the
     LLM selects and uses the server's tools).
+
+    Uses the protocol-era-neutral ``Client.server_info`` / ``Client.instructions``
+    rather than ``Client.initialize_result``: fastmcp 4 negotiates the modern
+    protocol when the upstream supports it, and on such a connection there is
+    no initialize handshake, so ``initialize_result`` is ``None`` and the relay
+    would silently come back empty.
     """
     proxy_kwargs: dict[str, Any] = {}
-    init = client.initialize_result
-    if init is None:
-        return proxy_kwargs
 
-    if info := getattr(init, "serverInfo", None):
-        if name := getattr(info, "name", None):
+    if info := client.server_info:
+        if name := info.name:
             proxy_kwargs["name"] = name
-        if version := getattr(info, "version", None):
+        if version := info.version:
             proxy_kwargs["version"] = version
-        if website_url := getattr(info, "websiteUrl", None):
+        if website_url := info.website_url:
             proxy_kwargs["website_url"] = website_url
-        if icons := getattr(info, "icons", None):
+        if icons := info.icons:
             proxy_kwargs["icons"] = icons
-    if instructions := getattr(init, "instructions", None):
+    if instructions := client.instructions:
         proxy_kwargs["instructions"] = instructions
 
     return proxy_kwargs

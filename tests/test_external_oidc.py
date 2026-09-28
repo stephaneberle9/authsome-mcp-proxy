@@ -523,7 +523,7 @@ class TestTokenRefresh:
         )
         context.set_tokens(existing_tokens)
 
-        # Mock httpx post response - refresh response WITHOUT refresh_token (common with Cognito, etc.)
+        # Mock httpx2 post response - refresh response WITHOUT refresh_token (common with Cognito, etc.)
         mock_response = Mock()
         mock_response.json.return_value = {
             "access_token": "new-access-token",
@@ -538,7 +538,7 @@ class TestTokenRefresh:
             patch(
                 "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
             ) as mock_get_config,
-            patch("httpx.AsyncClient.post", return_value=mock_response),
+            patch("httpx2.AsyncClient.post", return_value=mock_response),
         ):
             mock_get_config.return_value = mock_oidc_config
 
@@ -593,7 +593,7 @@ class TestTokenRefresh:
         )
         context.set_tokens(existing_tokens)
 
-        # Mock httpx post response - refresh response WITH new refresh_token
+        # Mock httpx2 post response - refresh response WITH new refresh_token
         mock_response = Mock()
         mock_response.json.return_value = {
             "access_token": "new-access-token",
@@ -608,7 +608,7 @@ class TestTokenRefresh:
             patch(
                 "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
             ) as mock_get_config,
-            patch("httpx.AsyncClient.post", return_value=mock_response),
+            patch("httpx2.AsyncClient.post", return_value=mock_response),
         ):
             mock_get_config.return_value = mock_oidc_config
 
@@ -665,7 +665,7 @@ class TestTokenRefresh:
         old_expiry = context.token_expiry_time
         assert old_expiry is not None
 
-        # Mock httpx post response with different expires_in
+        # Mock httpx2 post response with different expires_in
         mock_response = Mock()
         mock_response.json.return_value = {
             "access_token": "new-access-token",
@@ -679,7 +679,7 @@ class TestTokenRefresh:
             patch(
                 "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
             ) as mock_get_config,
-            patch("httpx.AsyncClient.post", return_value=mock_response),
+            patch("httpx2.AsyncClient.post", return_value=mock_response),
         ):
             mock_get_config.return_value = mock_oidc_config
 

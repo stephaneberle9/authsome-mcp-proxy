@@ -22,44 +22,22 @@ async def test_run_async_desktop_relays_server_info():
         issuer_url="https://auth.example.com", client_id="test-client"
     )
 
-    # Mock server_info and init_result that behave like Pydantic models
-    # with model_dump and extra fields
-    class MockModel:
-        def __init__(self, data):
-            self._data = data
-            for k, v in data.items():
-                setattr(self, k, v)
-
-        def model_dump(self, exclude=None):
-            if exclude is None:
-                return self._data.copy()
-            return {k: v for k, v in self._data.items() if k not in exclude}
-
     with patch("authsome_mcp_proxy.mcp_proxy.ExternalOIDCAuth"):
         with patch("authsome_mcp_proxy.mcp_proxy.Client") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.__aenter__.return_value = mock_client
 
-            server_info_data = {
-                "name": "BackendServer",
-                "version": "1.2.3",
-                "websiteUrl": "https://example.com",
-                "icons": [{"uri": "https://example.com/icon.png", "type": "image/png"}],
-                "title": "Some Title",
-                "custom_info_prop": "info-value",
-            }
-            mock_server_info = MockModel(server_info_data)
-
-            init_result_data = {
-                "serverInfo": mock_server_info,
-                "instructions": "Test instructions",
-                "custom_init_prop": "init-value",
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-            }
-            mock_init_result = MockModel(init_result_data)
-
-            mock_client.initialize_result = mock_init_result
+            # Shaped like mcp 2's Implementation: snake_case attributes, plus
+            # fields create_proxy does not accept, which must not leak through.
+            mock_client.server_info = SimpleNamespace(
+                name="BackendServer",
+                version="1.2.3",
+                website_url="https://example.com",
+                icons=[{"uri": "https://example.com/icon.png", "type": "image/png"}],
+                title="Some Title",
+                custom_info_prop="info-value",
+            )
+            mock_client.instructions = "Test instructions"
             mock_client_cls.return_value = mock_client
 
             with patch(
@@ -88,7 +66,6 @@ async def test_run_async_desktop_relays_server_info():
                 # Unknown props are filtered out so create_proxy doesn't TypeError
                 assert "title" not in call_kwargs
                 assert "custom_info_prop" not in call_kwargs
-                assert "custom_init_prop" not in call_kwargs
                 # Desktop mode never passes auth= to the FastMCP proxy server
                 assert "auth" not in call_kwargs
 
@@ -112,7 +89,8 @@ async def test_run_async_desktop_uses_fresh_proxy_client():
         with patch("authsome_mcp_proxy.mcp_proxy.Client") as mock_client_cls:
             info_client = AsyncMock()
             info_client.__aenter__.return_value = info_client
-            info_client.initialize_result = None
+            info_client.server_info = None
+            info_client.instructions = None
 
             proxy_client = AsyncMock()
 
@@ -634,3 +612,50 @@ async def test_serve_http_internals_cannot_be_shadowed_by_transport_kwargs(name)
                 False,
                 **{name: "hijacked"},  # ty: ignore[invalid-argument-type]
             )
+
+
+@pytest.mark.asyncio
+async def test_relay_server_info_reads_a_modern_protocol_upstream():
+    """Against a real FastMCP upstream, not a mock shaped like the old API.
+
+    fastmcp 4 negotiates the modern protocol when the upstream supports it, and
+    such a connection has no initialize handshake: ``initialize_result`` stays
+    ``None``. Reading identity from there made the relay come back empty without
+    any error, so the proxy showed up under FastMCP's generated name.
+    """
+    import httpx2
+    from fastmcp import Client, FastMCP
+    from fastmcp.client.transports import StreamableHttpTransport
+    from fastmcp.server.http import create_streamable_http_app
+
+    upstream = FastMCP(
+        name="upstream-name", version="9.9.9", instructions="use me wisely"
+    )
+    app = create_streamable_http_app(server=upstream, streamable_http_path="/mcp")
+
+    def client_factory(
+        headers: dict[str, str] | None = None,
+        timeout: httpx2.Timeout | None = None,
+        auth: httpx2.Auth | None = None,
+        **kwargs,
+    ) -> httpx2.AsyncClient:
+        if timeout is not None:
+            kwargs["timeout"] = timeout
+        return httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=app),
+            headers=headers,
+            auth=auth,
+            **kwargs,
+        )
+
+    transport = StreamableHttpTransport(
+        "http://testserver/mcp", httpx_client_factory=client_factory
+    )
+    async with app.router.lifespan_context(app), Client(transport) as client:
+        relayed = mcp_proxy._relay_server_info(client)
+
+    assert relayed == {
+        "name": "upstream-name",
+        "version": "9.9.9",
+        "instructions": "use me wisely",
+    }

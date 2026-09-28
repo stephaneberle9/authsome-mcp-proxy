@@ -29,7 +29,7 @@ from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
 import anyio
-import httpx
+import httpx2
 from exceptiongroup import BaseExceptionGroup
 from fastmcp.client.auth.oauth import TokenStorageAdapter
 from fastmcp.client.oauth_callback import (
@@ -192,7 +192,7 @@ class OIDCContext:
         self.token_expiry_time = None
 
 
-class ExternalOIDCAuth(httpx.Auth):
+class ExternalOIDCAuth(httpx2.Auth):
     """
     OAuth client provider that authenticates against external OIDC providers.
 
@@ -416,7 +416,7 @@ class ExternalOIDCAuth(httpx.Auth):
             token_data = self.context.get_token_exchange_data(auth_code, pkce)
 
             # Exchange authorization code for tokens
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 response = await client.post(
                     str(self.context.oidc_config.token_endpoint),
                     data=token_data,
@@ -441,7 +441,7 @@ class ExternalOIDCAuth(httpx.Auth):
 
             token_data = self.context.get_token_refresh_data()
 
-            async with httpx.AsyncClient() as client:
+            async with httpx2.AsyncClient() as client:
                 response = await client.post(
                     str(self.context.oidc_config.token_endpoint),
                     data=token_data,
@@ -506,12 +506,12 @@ class ExternalOIDCAuth(httpx.Auth):
         return self.context.get_access_token()
 
     async def async_auth_flow(
-        self, request: httpx.Request
-    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         """
         HTTPX auth flow implementation.
 
-        This method is compatible with httpx.Auth interface and automatically
+        This method is compatible with httpx2.Auth interface and automatically
         adds the Bearer token to requests.
         """
         # Get current access token or a new one if it has expired

@@ -22,9 +22,9 @@ import logging
 import os
 import sys
 
-import httpx
+import httpx2
 from exceptiongroup import BaseExceptionGroup
-from mcp.shared.exceptions import McpError
+from mcp.shared.exceptions import MCPError
 
 from . import __version__, mcp_proxy
 from .config import DesktopConfig, ProxyConfig, WebConfig
@@ -544,14 +544,14 @@ def log_error_and_exit(exc: BaseException) -> None:
         return
 
     # Log based on exception type
-    if isinstance(exc, httpx.HTTPStatusError | McpError):
+    if isinstance(exc, httpx2.HTTPStatusError | MCPError):
         logger.error(f"Backend error: {exc}")
     elif isinstance(
         exc,
-        httpx.ConnectError
-        | httpx.ConnectTimeout
-        | httpx.ReadTimeout
-        | httpx.TimeoutException,
+        httpx2.ConnectError
+        | httpx2.ConnectTimeout
+        | httpx2.ReadTimeout
+        | httpx2.TimeoutException,
     ):
         logger.error(f"Network error: {exc}")
     elif isinstance(exc, OSError):

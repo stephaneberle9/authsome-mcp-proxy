@@ -28,14 +28,14 @@ from collections.abc import AsyncGenerator, Generator
 from typing import TYPE_CHECKING
 
 import anyio
-import httpx
+import httpx2
 from fastmcp.server.dependencies import get_access_token
 
 if TYPE_CHECKING:
     from .config import WebConfig
 
 
-class ForwardSessionTokenAuth(httpx.Auth):
+class ForwardSessionTokenAuth(httpx2.Auth):
     """Forward the downstream session's bearer token to the upstream MCP.
 
     Reads the current FastMCP session's access token via
@@ -54,8 +54,8 @@ class ForwardSessionTokenAuth(httpx.Auth):
     requires_response_body = False
 
     async def async_auth_flow(
-        self, request: httpx.Request
-    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         token = get_access_token()
         if token is None or not token.token:
             raise RuntimeError(
@@ -67,7 +67,7 @@ class ForwardSessionTokenAuth(httpx.Auth):
         yield request
 
 
-class StaticHeaderAuth(httpx.Auth):
+class StaticHeaderAuth(httpx2.Auth):
     """Inject a configured literal header value on every outbound request.
 
     Single-tenant Pattern B.1 (tenant-scoped credential) and single-tenant
@@ -85,13 +85,13 @@ class StaticHeaderAuth(httpx.Auth):
         self.header_value = header_value
 
     def auth_flow(
-        self, request: httpx.Request
-    ) -> Generator[httpx.Request, httpx.Response]:
+        self, request: httpx2.Request
+    ) -> Generator[httpx2.Request, httpx2.Response]:
         request.headers[self.header_name] = self.header_value
         yield request
 
 
-class OAuthClientCredentialsAuth(httpx.Auth):
+class OAuthClientCredentialsAuth(httpx2.Auth):
     """OAuth 2.0 client_credentials grant for outbound calls.
 
     Obtains a service-account access token from a separately configured
@@ -125,8 +125,8 @@ class OAuthClientCredentialsAuth(httpx.Auth):
         self._lock = anyio.Lock()
 
     async def async_auth_flow(
-        self, request: httpx.Request
-    ) -> AsyncGenerator[httpx.Request, httpx.Response]:
+        self, request: httpx2.Request
+    ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         token = await self._get_token()
         request.headers["Authorization"] = f"Bearer {token}"
         yield request
@@ -163,7 +163,7 @@ class OAuthClientCredentialsAuth(httpx.Auth):
         if self.scope:
             data["scope"] = self.scope
 
-        async with httpx.AsyncClient() as client:
+        async with httpx2.AsyncClient() as client:
             response = await client.post(self.token_url, data=data, timeout=10.0)
             response.raise_for_status()
             payload = response.json()
@@ -175,8 +175,8 @@ class OAuthClientCredentialsAuth(httpx.Auth):
         )
 
 
-def build_outbound_auth(config: WebConfig) -> httpx.Auth:
-    """Build an ``httpx.Auth`` matching ``config.outbound_auth``.
+def build_outbound_auth(config: WebConfig) -> httpx2.Auth:
+    """Build an ``httpx2.Auth`` matching ``config.outbound_auth``.
 
     The returned auth instance is attached to the per-session ``Client``
     that FastMCP's ``create_proxy`` produces, so its hooks run within the
@@ -189,7 +189,7 @@ def build_outbound_auth(config: WebConfig) -> httpx.Auth:
             populated.
 
     Returns:
-        An ``httpx.Auth`` instance ready to plug into a per-session Client.
+        An ``httpx2.Auth`` instance ready to plug into a per-session Client.
 
     Raises:
         ValueError: If ``config.outbound_auth`` is unknown.

@@ -11,7 +11,7 @@ whole design exists to prevent.
 import asyncio
 from contextlib import asynccontextmanager
 
-import httpx
+import httpx2
 import pytest
 from fastmcp import FastMCP
 from fastmcp.server.auth.providers.in_memory import InMemoryOAuthProvider
@@ -57,8 +57,8 @@ def router():
 
 async def _get(router, path, host=None):
     headers = {"Host": host} if host else {}
-    transport = httpx.ASGITransport(app=router)
-    async with httpx.AsyncClient(
+    transport = httpx2.ASGITransport(app=router)
+    async with httpx2.AsyncClient(
         transport=transport, base_url="http://testserver"
     ) as client:
         return await client.get(path, headers=headers)
@@ -114,8 +114,8 @@ async def test_unknown_host_gets_the_canonical_identity(router):
 async def test_protected_endpoint_challenges_with_its_own_metadata_url(router):
     """The 401 is what bootstraps discovery: it points the client at the
     resource metadata of the host it actually contacted."""
-    transport = httpx.ASGITransport(app=router)
-    async with httpx.AsyncClient(
+    transport = httpx2.ASGITransport(app=router)
+    async with httpx2.AsyncClient(
         transport=transport, base_url="http://testserver"
     ) as client:
         response = await client.post(
@@ -139,7 +139,7 @@ async def test_protected_endpoint_challenges_with_its_own_metadata_url(router):
 async def running(app):
     """Drive the ASGI lifespan protocol for real, in a background task.
 
-    ``httpx.ASGITransport`` never sends lifespan events, so the tests above
+    ``httpx2.ASGITransport`` never sends lifespan events, so the tests above
     exercise routing and metadata only — they would still pass if the router
     started no child at all. A request that gets past auth needs the child's
     StreamableHTTPSessionManager, which exists only if its lifespan ran.
@@ -187,8 +187,8 @@ async def test_every_host_serves_a_live_mcp_session():
 
     async with running(router):
         for host in ("mcp.example.io", "mcp.example.com"):
-            async with httpx.AsyncClient(
-                transport=httpx.ASGITransport(app=router),
+            async with httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=router),
                 base_url="http://testserver",
             ) as client:
                 response = await client.post(

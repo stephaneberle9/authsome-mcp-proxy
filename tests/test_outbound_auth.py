@@ -1,10 +1,10 @@
 """Tests for authsome_mcp_proxy.outbound_auth — outbound auth mode factory.
 
-These tests exercise the httpx.Auth classes directly without spinning up a
+These tests exercise the httpx2.Auth classes directly without spinning up a
 FastMCP server, by:
 
 - Mocking ``get_access_token`` for forward mode
-- Using ``respx`` is overkill here; instead we patch ``httpx.AsyncClient.post``
+- Using ``respx`` is overkill here; instead we patch ``httpx2.AsyncClient.post``
   for the client_credentials refresh path
 - For static mode, just inspecting the resulting request headers
 """
@@ -14,7 +14,7 @@ from __future__ import annotations
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import httpx
+import httpx2
 import pytest
 
 from authsome_mcp_proxy.config import WebConfig
@@ -35,7 +35,7 @@ def _base_keycloak_kwargs() -> dict:
 
 
 class TestBuildOutboundAuthDispatch:
-    """The factory should pick the right httpx.Auth shape for each mode."""
+    """The factory should pick the right httpx2.Auth shape for each mode."""
 
     def test_forward_returns_forward_auth(self):
         config = WebConfig(**_base_keycloak_kwargs())
@@ -97,7 +97,7 @@ class TestForwardSessionTokenAuth:
             return_value=mock_token,
         ):
             auth = ForwardSessionTokenAuth()
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             yielded = await flow.__anext__()
 
@@ -109,7 +109,7 @@ class TestForwardSessionTokenAuth:
             "authsome_mcp_proxy.outbound_auth.get_access_token", return_value=None
         ):
             auth = ForwardSessionTokenAuth()
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             with pytest.raises(RuntimeError, match="No inbound session access token"):
                 await flow.__anext__()
@@ -122,7 +122,7 @@ class TestForwardSessionTokenAuth:
             return_value=mock_token,
         ):
             auth = ForwardSessionTokenAuth()
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             with pytest.raises(RuntimeError):
                 await flow.__anext__()
@@ -135,7 +135,7 @@ class TestStaticHeaderAuth:
         auth = StaticHeaderAuth(
             header_name="Authorization", header_value="Bearer abc123"
         )
-        request = httpx.Request("GET", "https://upstream.example.com/")
+        request = httpx2.Request("GET", "https://upstream.example.com/")
         # auth_flow is a sync generator; iterate once
         flow = auth.auth_flow(request)
         yielded = next(flow)
@@ -143,7 +143,7 @@ class TestStaticHeaderAuth:
 
     def test_injects_custom_header_name(self):
         auth = StaticHeaderAuth(header_name="X-API-Key", header_value="abc123")
-        request = httpx.Request("GET", "https://upstream.example.com/")
+        request = httpx2.Request("GET", "https://upstream.example.com/")
         flow = auth.auth_flow(request)
         yielded = next(flow)
         assert yielded.headers["X-API-Key"] == "abc123"
@@ -153,7 +153,7 @@ class TestStaticHeaderAuth:
         auth = StaticHeaderAuth(
             header_name="Authorization", header_value="Bearer fresh"
         )
-        request = httpx.Request(
+        request = httpx2.Request(
             "GET",
             "https://upstream.example.com/",
             headers={"Authorization": "Bearer stale"},
@@ -188,10 +188,10 @@ class TestOAuthClientCredentialsAuth:
         mock_client.post.return_value = mock_response
 
         with patch(
-            "authsome_mcp_proxy.outbound_auth.httpx.AsyncClient",
+            "authsome_mcp_proxy.outbound_auth.httpx2.AsyncClient",
             return_value=mock_client,
         ):
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             yielded = await flow.__anext__()
 
@@ -216,9 +216,9 @@ class TestOAuthClientCredentialsAuth:
         auth._expires_at = time.time() + 3600
 
         with patch(
-            "authsome_mcp_proxy.outbound_auth.httpx.AsyncClient"
+            "authsome_mcp_proxy.outbound_auth.httpx2.AsyncClient"
         ) as mock_client_class:
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             yielded = await flow.__anext__()
 
@@ -248,10 +248,10 @@ class TestOAuthClientCredentialsAuth:
         mock_client.post.return_value = mock_response
 
         with patch(
-            "authsome_mcp_proxy.outbound_auth.httpx.AsyncClient",
+            "authsome_mcp_proxy.outbound_auth.httpx2.AsyncClient",
             return_value=mock_client,
         ):
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             yielded = await flow.__anext__()
 
@@ -275,10 +275,10 @@ class TestOAuthClientCredentialsAuth:
         mock_client.post.return_value = mock_response
 
         with patch(
-            "authsome_mcp_proxy.outbound_auth.httpx.AsyncClient",
+            "authsome_mcp_proxy.outbound_auth.httpx2.AsyncClient",
             return_value=mock_client,
         ):
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             await flow.__anext__()
 
@@ -303,10 +303,10 @@ class TestOAuthClientCredentialsAuth:
         mock_client.post.return_value = mock_response
 
         with patch(
-            "authsome_mcp_proxy.outbound_auth.httpx.AsyncClient",
+            "authsome_mcp_proxy.outbound_auth.httpx2.AsyncClient",
             return_value=mock_client,
         ):
-            request = httpx.Request("GET", "https://upstream.example.com/")
+            request = httpx2.Request("GET", "https://upstream.example.com/")
             flow = auth.async_auth_flow(request)
             await flow.__anext__()
 
@@ -314,3 +314,56 @@ class TestOAuthClientCredentialsAuth:
             mock_client.post.call_args.kwargs["data"]["scope"]
             == "upstream:read upstream:write"
         )
+
+
+class TestAcceptedByFastMCPClient:
+    """The auth objects must be usable by the HTTP stack fastmcp actually runs.
+
+    The unit tests above drive ``auth_flow`` by hand, so they pass whatever
+    library the classes subclass. fastmcp hands ``auth`` to its own HTTP client,
+    which rejects anything that is not an instance of *its* ``Auth`` base class
+    with ``TypeError: Invalid "auth" argument`` -- at connect time, not at
+    construction. This happened when fastmcp 4 moved from ``httpx`` to
+    ``httpx2`` while these classes still subclassed ``httpx.Auth``. Only a real
+    ``Client`` round trip catches it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_static_header_reaches_upstream_through_fastmcp_client(self):
+        from fastmcp import Client, FastMCP
+        from fastmcp.client.transports import StreamableHttpTransport
+        from fastmcp.server.dependencies import get_http_headers
+        from fastmcp.server.http import create_streamable_http_app
+
+        upstream = FastMCP(name="upstream")
+
+        @upstream.tool()
+        def echo_header() -> str:
+            return get_http_headers(include_all=True).get("x-api-key", "<missing>")
+
+        app = create_streamable_http_app(server=upstream, streamable_http_path="/mcp")
+
+        def client_factory(
+            headers: dict[str, str] | None = None,
+            timeout: httpx2.Timeout | None = None,
+            auth: httpx2.Auth | None = None,
+            **kwargs,
+        ) -> httpx2.AsyncClient:
+            if timeout is not None:
+                kwargs["timeout"] = timeout
+            return httpx2.AsyncClient(
+                transport=httpx2.ASGITransport(app=app),
+                headers=headers,
+                auth=auth,
+                **kwargs,
+            )
+
+        transport = StreamableHttpTransport(
+            "http://testserver/mcp",
+            auth=StaticHeaderAuth("X-API-Key", "abc123"),
+            httpx_client_factory=client_factory,
+        )
+        async with app.router.lifespan_context(app), Client(transport) as client:
+            result = await client.call_tool("echo_header", {})
+
+        assert result.data == "abc123"
