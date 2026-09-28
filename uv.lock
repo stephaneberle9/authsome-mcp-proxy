@@ -114,6 +114,7 @@ dev = [
 ]
 test = [
     { name = "inline-snapshot" },
+    { name = "packaging" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
     { name = "pytest-cov" },
@@ -144,6 +145,7 @@ dev = [
 ]
 test = [
     { name = "inline-snapshot", specifier = ">=0.6.0" },
+    { name = "packaging", specifier = ">=22" },
     { name = "pytest", specifier = ">=7.0.0" },
     { name = "pytest-asyncio", specifier = ">=0.21.0" },
     { name = "pytest-cov", specifier = ">=4.0.0" },
