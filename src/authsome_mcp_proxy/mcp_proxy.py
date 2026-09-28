@@ -109,8 +109,7 @@ async def _run_desktop(
 
     # Connect once to relay upstream server identity (name/version/icons/etc.)
     # so the proxy appears transparent to the MCP client.
-    async with Client(transport=upstream_url, auth=auth) as authenticated_client:
-        proxy_kwargs = _relay_server_info(authenticated_client)
+    proxy_kwargs = await _relay_upstream_identity(upstream_url, auth)
 
     # Disconnected client; FastMCP calls client.new() per session.
     proxy_client = Client(transport=upstream_url, auth=auth)
@@ -286,6 +285,42 @@ def _server_identity_kwargs(config: WebConfig) -> dict[str, Any]:
     if config.proxy_website_url:
         kwargs["website_url"] = config.proxy_website_url
     return kwargs
+
+
+async def _relay_upstream_identity(
+    upstream_url: str, auth: ExternalOIDCAuth
+) -> dict[str, Any]:
+    """Connect to the upstream and collect the identity the proxy should relay.
+
+    On the modern protocol the server's name and version are only an optional
+    ``_meta`` stamp on the ``server/discover`` result, and some servers do not
+    send it: Quarkus MCP Server 2.0.0 puts ``serverInfo`` at the top level of
+    the result instead, where the MCP SDK drops it as an unknown field. The
+    proxy would then show up under FastMCP's generated name. When the first
+    connection yields no name, a second one pinned to the initialize handshake
+    reads it from ``InitializeResult.serverInfo``, which every server fills in.
+    Values from the first connection win where both are present.
+    """
+    async with Client(transport=upstream_url, auth=auth) as client:
+        proxy_kwargs = _relay_server_info(client)
+    if "name" in proxy_kwargs:
+        return proxy_kwargs
+
+    try:
+        async with Client(
+            transport=upstream_url, auth=auth, mode="legacy"
+        ) as legacy_client:
+            legacy_kwargs = _relay_server_info(legacy_client)
+    except Exception as e:
+        # The identity is cosmetic; an upstream that only speaks the modern
+        # protocol must not be kept from starting over it.
+        logger.warning(
+            "Upstream did not identify itself and the initialize handshake "
+            "failed (%s); advertising FastMCP's generated server name",
+            e,
+        )
+        return proxy_kwargs
+    return {**legacy_kwargs, **proxy_kwargs}
 
 
 def _relay_server_info(client: Client) -> dict[str, Any]:

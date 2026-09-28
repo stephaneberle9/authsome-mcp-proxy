@@ -89,7 +89,10 @@ async def test_run_async_desktop_uses_fresh_proxy_client():
         with patch("authsome_mcp_proxy.mcp_proxy.Client") as mock_client_cls:
             info_client = AsyncMock()
             info_client.__aenter__.return_value = info_client
-            info_client.server_info = None
+            # Named, so no second relay connection falls back to the handshake.
+            info_client.server_info = SimpleNamespace(
+                name="BackendServer", version=None, website_url=None, icons=None
+            )
             info_client.instructions = None
 
             proxy_client = AsyncMock()
@@ -111,6 +114,65 @@ async def test_run_async_desktop_uses_fresh_proxy_client():
                 received_client = mock_create_proxy.call_args.args[0]
                 assert received_client is proxy_client
                 assert received_client is not info_client
+
+
+def _connected_client(server_info, instructions):
+    client = AsyncMock()
+    client.__aenter__.return_value = client
+    client.server_info = server_info
+    client.instructions = instructions
+    return client
+
+
+@pytest.mark.asyncio
+async def test_relay_falls_back_to_the_handshake_when_discover_has_no_name():
+    """Quarkus MCP Server 2.0.0 answers server/discover with serverInfo at the
+    top level instead of in _meta, so the MCP SDK sees no identity on the
+    modern protocol. A second connection pinned to the initialize handshake
+    must supply name and version, while the modern connection's instructions
+    stay."""
+    modern = _connected_client(None, "modern instructions")
+    legacy = _connected_client(
+        SimpleNamespace(
+            name="secure-repository-mcp",
+            version="1.0.0",
+            website_url=None,
+            icons=None,
+        ),
+        "legacy instructions",
+    )
+
+    with patch(
+        "authsome_mcp_proxy.mcp_proxy.Client", side_effect=[modern, legacy]
+    ) as mock_client_cls:
+        relayed = await mcp_proxy._relay_upstream_identity(
+            "http://upstream", MagicMock()
+        )
+
+    assert mock_client_cls.call_args_list[1].kwargs["mode"] == "legacy"
+    assert relayed == {
+        "name": "secure-repository-mcp",
+        "version": "1.0.0",
+        "instructions": "modern instructions",
+    }
+
+
+@pytest.mark.asyncio
+async def test_relay_keeps_what_it_has_when_the_handshake_fails(caplog):
+    """An upstream that only speaks the modern protocol rejects initialize. The
+    identity is cosmetic, so the proxy must still start, and say why it runs
+    under a generated name."""
+    modern = _connected_client(None, "modern instructions")
+    failing = AsyncMock()
+    failing.__aenter__.side_effect = RuntimeError("Client failed to connect")
+
+    with patch("authsome_mcp_proxy.mcp_proxy.Client", side_effect=[modern, failing]):
+        relayed = await mcp_proxy._relay_upstream_identity(
+            "http://upstream", MagicMock()
+        )
+
+    assert relayed == {"instructions": "modern instructions"}
+    assert "generated server name" in caplog.text
 
 
 # ---------------------------------------------------------------------------
