@@ -7,6 +7,7 @@ from starlette.middleware import Middleware
 
 from authsome_mcp_proxy import mcp_proxy
 from authsome_mcp_proxy.config import DesktopConfig, WebConfig
+from authsome_mcp_proxy.upstream_identity import UpstreamIdentityMiddleware
 
 # ---------------------------------------------------------------------------
 # Desktop (stdio) mode
@@ -209,7 +210,7 @@ async def test_run_async_web_wires_outbound_auth_and_defers_serving():
         proxy_client = AsyncMock()
         mock_client_cls.return_value = proxy_client
 
-        mock_proxy_server = AsyncMock()
+        mock_proxy_server = MagicMock()
         mock_create_proxy.return_value = mock_proxy_server
 
         await mcp_proxy.run_async(upstream_url, web_config, show_banner=False)
@@ -233,6 +234,13 @@ async def test_run_async_web_wires_outbound_auth_and_defers_serving():
         assert "version" not in cp_args.kwargs
         assert "instructions" not in cp_args.kwargs
         assert "website_url" not in cp_args.kwargs
+
+        # The upstream's identity is relayed per handshake instead, by a
+        # middleware that only fills the fields the operator left unset.
+        mock_proxy_server.add_middleware.assert_called_once()
+        middleware = mock_proxy_server.add_middleware.call_args.args[0]
+        assert isinstance(middleware, UpstreamIdentityMiddleware)
+        assert middleware._relayed_fields == ("instructions", "website_url", "icons")
 
         mock_serve.assert_called_once_with(mock_proxy_server, web_config, False)
 
@@ -260,7 +268,7 @@ async def test_run_async_web_forwards_server_identity_kwargs():
         patch("authsome_mcp_proxy.mcp_proxy.create_proxy") as mock_create_proxy,
         patch("authsome_mcp_proxy.mcp_proxy._serve_http", new_callable=AsyncMock),
     ):
-        mock_proxy_server = AsyncMock()
+        mock_proxy_server = MagicMock()
         mock_create_proxy.return_value = mock_proxy_server
 
         await mcp_proxy.run_async("http://upstream:8080", web_config, show_banner=False)
@@ -290,7 +298,7 @@ async def test_run_async_web_omits_unset_server_identity_kwargs():
         patch("authsome_mcp_proxy.mcp_proxy.create_proxy") as mock_create_proxy,
         patch("authsome_mcp_proxy.mcp_proxy._serve_http", new_callable=AsyncMock),
     ):
-        mock_proxy_server = AsyncMock()
+        mock_proxy_server = MagicMock()
         mock_create_proxy.return_value = mock_proxy_server
 
         await mcp_proxy.run_async("http://upstream:8080", web_config, show_banner=False)
@@ -322,7 +330,7 @@ async def test_run_async_web_forwards_transport_kwargs():
             "authsome_mcp_proxy.mcp_proxy._serve_http", new_callable=AsyncMock
         ) as mock_serve,
     ):
-        mock_proxy_server = AsyncMock()
+        mock_proxy_server = MagicMock()
         mock_create_proxy.return_value = mock_proxy_server
 
         await mcp_proxy.run_async(

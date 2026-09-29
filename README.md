@@ -369,12 +369,25 @@ connection reaches `/authorize` with no `/register` call ahead of it.
 
 ## Identity advertised to downstream clients
 
-In stdio mode the proxy auto-relays the upstream MCP server's
-`serverInfo` (name, version, instructions, website URL) so the proxy
-appears transparent. In web mode this auto-relay can't always happen
-(with `--outbound-auth forward` there's no inbound session at startup),
-so set the four identity fields explicitly via CLI / env when you want
-the proxy to impersonate the upstream:
+In stdio mode the proxy relays the upstream MCP server's identity (name,
+version, instructions, website URL, icons) at startup, so the proxy
+appears transparent.
+
+In web mode the proxy cannot read the upstream at startup: with
+`--outbound-auth forward` the upstream only accepts a user's token, and
+no user has connected yet. So the identity is split:
+
+- **Instructions, website URL and icons** are relayed from the upstream
+  when a client connects. The first handshake fetches them with that
+  client's credential; the result is cached for 10 minutes, so a
+  redeployed upstream is picked up without restarting the proxy. If the
+  fetch fails, the client still connects and sees the proxy's own values.
+- **Name and version** are yours to set. FastMCP also uses the server
+  name outside the handshake, where a relayed value would not reach it.
+  Unset, they fall back to FastMCP's auto-generated `FastMCPProxy-xxxx`
+  and FastMCP's own version.
+
+Any field you set explicitly wins over the relayed one:
 
 ```bash
 uvx authsome-mcp-proxy ... \
@@ -383,9 +396,6 @@ uvx authsome-mcp-proxy ... \
   --proxy-instructions "Use this tool to do amazing things." \
   --proxy-website-url https://awesome.tool.example.com
 ```
-
-Whichever fields you set are advertised to downstream clients; the rest
-fall back to FastMCP's auto-generated `FastMCPProxy-xxxx`.
 
 ## Serving several hostnames from one deployment
 

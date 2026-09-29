@@ -26,6 +26,7 @@ import logging
 from typing import Any
 
 import fastmcp
+import httpx2
 import uvicorn
 from fastmcp import Client
 from fastmcp.server import create_proxy
@@ -38,6 +39,7 @@ from .external_oidc import ExternalOIDCAuth
 from .host_router import HostRouter
 from .inbound_auth import build_inbound_auth
 from .outbound_auth import build_outbound_auth
+from .upstream_identity import UpstreamIdentityMiddleware
 
 logger = logging.getLogger(__name__)
 
@@ -142,19 +144,24 @@ async def _run_web(
     """
     outbound_auth = build_outbound_auth(config)
 
-    # Server-identity relay (the stdio path's pre-flight initialize handshake
-    # against the upstream) is skipped in web mode: with outbound_auth='forward'
-    # there is no inbound session yet, and with the other modes the proxy-owned
-    # credential may or may not be authorized to call initialize. Operators who
-    # want the proxy to appear transparent set proxy_name / proxy_version /
-    # etc. on the config; without them FastMCP falls back to its auto-generated
-    # FastMCPProxy-xxxx name.
+    # The stdio path's pre-flight relay cannot run here: with
+    # outbound_auth='forward' there is no inbound session yet to borrow a
+    # credential from. Name and version come from the operator's config --
+    # without them FastMCP falls back to its auto-generated FastMCPProxy-xxxx
+    # name -- and the upstream's instructions, website URL and icons are
+    # relayed per handshake by UpstreamIdentityMiddleware instead.
     proxy_kwargs = _server_identity_kwargs(config)
     proxy_client = Client(transport=upstream_url, auth=outbound_auth)
 
     # No auth= here: it is supplied per app below. The server is never served
     # through its own http_app(), which would be unauthenticated.
     mcp_proxy = create_proxy(proxy_client, **proxy_kwargs)
+    mcp_proxy.add_middleware(
+        UpstreamIdentityMiddleware(
+            lambda: _relay_upstream_identity(upstream_url, outbound_auth),
+            configured_fields=proxy_kwargs.keys(),
+        )
+    )
 
     await _serve_http(mcp_proxy, config, show_banner, **transport_kwargs)
 
@@ -288,7 +295,7 @@ def _server_identity_kwargs(config: WebConfig) -> dict[str, Any]:
 
 
 async def _relay_upstream_identity(
-    upstream_url: str, auth: ExternalOIDCAuth
+    upstream_url: str, auth: httpx2.Auth | None
 ) -> dict[str, Any]:
     """Connect to the upstream and collect the identity the proxy should relay.
 
