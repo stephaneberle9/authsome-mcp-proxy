@@ -1,13 +1,17 @@
 """Outbound auth mode factory for the web (HTTP) transport.
 
 The proxy authenticates outbound calls to the upstream MCP server using
-one of three mechanisms -- see ``WebConfig.outbound_auth``:
+one of four mechanisms -- see ``WebConfig.outbound_auth``:
 
 - ``forward``: reuse the downstream session's bearer token. The current
   session's access token is read from FastMCP's per-request auth context
   via :func:`fastmcp.server.dependencies.get_access_token` and copied into
   the outbound ``Authorization: Bearer <token>`` header. Pattern C (and
   Pattern A passthrough by the same shape).
+- ``none``: send no credential. FastMCP's proxy copies the downstream
+  request's ``Authorization`` header onto the upstream connection by default,
+  so "no outbound auth" has to strip it rather than merely add nothing --
+  otherwise the user's token reaches an upstream that never asked for it.
 - ``oauth-client-credentials``: proxy obtains its own access token via the
   OAuth 2.0 client_credentials grant against an outbound token endpoint
   that is *independent* of the inbound IdP -- in Pattern B the upstream's
@@ -32,7 +36,7 @@ import httpx2
 from fastmcp.server.dependencies import get_access_token
 
 if TYPE_CHECKING:
-    from .config import WebConfig
+    from .config import UpstreamRoute, WebConfig
 
 
 class ForwardSessionTokenAuth(httpx2.Auth):
@@ -64,6 +68,27 @@ class ForwardSessionTokenAuth(httpx2.Auth):
                 "the user's token to the upstream MCP server."
             )
         request.headers["Authorization"] = f"Bearer {token.token}"
+        yield request
+
+
+class NoCredentialAuth(httpx2.Auth):
+    """Send the upstream no credential at all.
+
+    For an upstream that authenticates nobody, such as a read-only knowledge
+    server. Adding nothing would not be enough: FastMCP's proxy forwards the
+    downstream request's headers to the upstream, ``Authorization`` included,
+    and the auth flow is the last point before the request leaves the proxy.
+    Removing the header here keeps the user's token -- a credential that
+    opens the proxy itself -- away from a server that has no use for it.
+    """
+
+    requires_request_body = False
+    requires_response_body = False
+
+    def auth_flow(
+        self, request: httpx2.Request
+    ) -> Generator[httpx2.Request, httpx2.Response]:
+        request.headers.pop("Authorization", None)
         yield request
 
 
@@ -175,7 +200,7 @@ class OAuthClientCredentialsAuth(httpx2.Auth):
         )
 
 
-def build_outbound_auth(config: WebConfig) -> httpx2.Auth:
+def build_outbound_auth(config: WebConfig | UpstreamRoute) -> httpx2.Auth:
     """Build an ``httpx2.Auth`` matching ``config.outbound_auth``.
 
     The returned auth instance is attached to the per-session ``Client``
@@ -184,9 +209,9 @@ def build_outbound_auth(config: WebConfig) -> httpx2.Auth:
     where the auth reads ContextVar-backed per-session state.
 
     Args:
-        config: Web-mode configuration. ``WebConfig.__post_init__`` has
-            already validated that all required per-mode fields are
-            populated.
+        config: Web-mode configuration, or one route of a multi-upstream
+            configuration. Its ``__post_init__`` has already validated that
+            all required per-mode fields are populated.
 
     Returns:
         An ``httpx2.Auth`` instance ready to plug into a per-session Client.
@@ -196,6 +221,9 @@ def build_outbound_auth(config: WebConfig) -> httpx2.Auth:
     """
     if config.outbound_auth == "forward":
         return ForwardSessionTokenAuth()
+
+    if config.outbound_auth == "none":
+        return NoCredentialAuth()
 
     if config.outbound_auth == "oauth-client-credentials":
         assert config.outbound_token_url is not None
@@ -216,5 +244,5 @@ def build_outbound_auth(config: WebConfig) -> httpx2.Auth:
 
     raise ValueError(
         f"Unknown outbound_auth {config.outbound_auth!r}; supported: "
-        "forward, oauth-client-credentials, static"
+        "forward, none, oauth-client-credentials, static"
     )

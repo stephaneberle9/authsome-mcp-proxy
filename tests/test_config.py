@@ -1,8 +1,10 @@
 """Tests for authsome_mcp_proxy.config module."""
 
+from typing import Any
+
 import pytest
 
-from authsome_mcp_proxy.config import DesktopConfig, WebConfig
+from authsome_mcp_proxy.config import DesktopConfig, UpstreamRoute, WebConfig
 
 
 class TestDesktopConfig:
@@ -193,6 +195,10 @@ class TestWebConfigOutbound:
         )
         assert config.outbound_auth == "oauth-client-credentials"
 
+    def test_none_needs_no_further_fields(self):
+        config = WebConfig(**self._base_keycloak_kwargs(), outbound_auth="none")
+        assert config.outbound_auth == "none"
+
     def test_static_requires_header_value(self):
         with pytest.raises(ValueError, match="static.*outbound_header_value"):
             WebConfig(**self._base_keycloak_kwargs(), outbound_auth="static")
@@ -268,3 +274,114 @@ def test_rejects_base_url_without_a_hostname():
             additional_proxy_base_urls=["mcp.example.com"],
             issuer_url="https://kc.example.com/realms/r",
         )
+
+
+# ---------------------------------------------------------------------------
+# Several upstreams
+# ---------------------------------------------------------------------------
+
+
+def _multi(**overrides) -> WebConfig:
+    kwargs: dict[str, Any] = {
+        "inbound_auth_provider": "keycloak",
+        "proxy_base_url": "https://mcp.example.com",
+        "issuer_url": "https://kc.example.com/realms/r",
+        "upstreams": [
+            UpstreamRoute(name="secure", mcp_url="http://secure:8080/mcp"),
+            UpstreamRoute(name="emb3d", mcp_url="http://emb3d:8080/mcp"),
+        ],
+    }
+    kwargs.update(overrides)
+    return WebConfig(**kwargs)
+
+
+class TestUpstreamRoute:
+    @pytest.mark.parametrize("name", ["secure", "emb3d", "knowledge-base", "0day", "a"])
+    def test_accepts_path_and_env_safe_names(self, name):
+        assert UpstreamRoute(name=name, mcp_url="http://u/mcp").path == f"/{name}/mcp"
+
+    @pytest.mark.parametrize(
+        "name", ["", "Secure", "-secure", "emb_3d", "a/b", "a.b", "mcp ", "ümlaut"]
+    )
+    def test_rejects_names_that_are_not_path_and_env_safe(self, name):
+        """The name becomes both a path segment and part of an environment
+        variable name; underscores would make two names map to one variable."""
+        with pytest.raises(ValueError, match="must match"):
+            UpstreamRoute(name=name, mcp_url="http://u/mcp")
+
+    def test_requires_a_url(self):
+        with pytest.raises(ValueError, match="'secure' requires mcp_url"):
+            UpstreamRoute(name="secure", mcp_url="")
+
+    def test_defaults_match_the_single_upstream_defaults(self):
+        route = UpstreamRoute(name="secure", mcp_url="http://u/mcp")
+        assert route.outbound_auth == "forward"
+        assert route.outbound_header_name == "Authorization"
+        assert route.proxy_name is None
+
+    def test_outbound_validation_names_the_route(self):
+        with pytest.raises(
+            ValueError, match="upstream 'emb3d': outbound_auth='static' requires"
+        ):
+            UpstreamRoute(name="emb3d", mcp_url="http://u/mcp", outbound_auth="static")
+        with pytest.raises(
+            ValueError,
+            match="upstream 'emb3d': outbound_auth='oauth-client-credentials' "
+            "requires outbound_client_id",
+        ):
+            UpstreamRoute(
+                name="emb3d",
+                mcp_url="http://u/mcp",
+                outbound_auth="oauth-client-credentials",
+            )
+
+    def test_none_needs_no_further_fields(self):
+        route = UpstreamRoute(
+            name="emb3d", mcp_url="http://u/mcp", outbound_auth="none"
+        )
+        assert route.outbound_auth == "none"
+
+    def test_rejects_an_unknown_outbound_mode(self):
+        """Env values bypass argparse's choices, so a typo has to be caught here
+        -- and name the route it was meant for."""
+        with pytest.raises(ValueError, match="upstream 'emb3d': outbound_auth must be"):
+            UpstreamRoute(
+                name="emb3d",
+                mcp_url="http://u/mcp",
+                outbound_auth="nope",  # ty: ignore[invalid-argument-type]
+            )
+
+
+class TestWebConfigUpstreams:
+    def test_single_upstream_by_default(self):
+        """Every existing deployment: no routes, no default."""
+        config = WebConfig(
+            inbound_auth_provider="keycloak",
+            proxy_base_url="https://mcp.example.com",
+            issuer_url="https://kc.example.com/realms/r",
+        )
+        assert config.upstreams == []
+        assert config.default_upstream is None
+
+    def test_default_upstream_must_be_a_route(self):
+        assert _multi(default_upstream="secure").default_upstream == "secure"
+        with pytest.raises(ValueError, match="'other' is not among the upstreams"):
+            _multi(default_upstream="other")
+
+    def test_default_upstream_requires_upstreams(self):
+        with pytest.raises(ValueError, match="default_upstream requires upstreams"):
+            _multi(upstreams=[], default_upstream="secure")
+
+    def test_route_names_must_be_unique(self):
+        """Two routes with one name would share a path; the second would never
+        be reachable."""
+        route = UpstreamRoute(name="secure", mcp_url="http://a/mcp")
+        twin = UpstreamRoute(name="secure", mcp_url="http://b/mcp")
+        with pytest.raises(ValueError, match="duplicated: secure"):
+            _multi(upstreams=[route, twin])
+
+    def test_top_level_outbound_is_not_validated_with_upstreams(self):
+        """With routes, the top-level outbound settings are unused -- each route
+        validates its own -- so an incomplete one must not block startup."""
+        config = _multi(outbound_auth="static")
+        assert config.outbound_header_value is None

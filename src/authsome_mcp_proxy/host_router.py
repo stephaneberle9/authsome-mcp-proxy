@@ -29,19 +29,23 @@ header. One process, one upstream client, N fully correct identities.
 Only hostnames derived from configured base URLs are ever matched -- the ``Host``
 header selects among them but never defines one, so a forged header can at worst
 reach an identity the operator already published.
+
+The lifespan helpers at the bottom are shared with
+:mod:`authsome_mcp_proxy.path_router`, whose router nests inside this one when a
+hostname fronts several upstreams.
 """
 
 from __future__ import annotations
 
 import logging
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 from typing import TYPE_CHECKING, Any, Protocol
 from urllib.parse import urlsplit
 
 from starlette.types import Receive, Scope, Send
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import AsyncIterator, Iterable, Mapping
     from contextlib import AbstractAsyncContextManager
 
 logger = logging.getLogger(__name__)
@@ -139,6 +143,10 @@ class HostRouter:
         self._canonical = apps[canonical_base_url]
         self._canonical_host = host_of(canonical_base_url)
 
+    def lifespan(self, app: Any, /) -> AbstractAsyncContextManager[None]:
+        """Enter every child's lifespan; see :func:`enter_lifespans`."""
+        return enter_lifespans(self._children)
+
     def app_for_host(self, host: str | None) -> LifespanApp:
         """Resolve a hostname to its app, falling back to the canonical one."""
         if host is None:
@@ -147,7 +155,7 @@ class HostRouter:
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] == "lifespan":
-            await self._lifespan(scope, receive, send)
+            await serve_lifespan(self.lifespan(self), receive, send)
             return
 
         host = _request_host(scope)
@@ -162,28 +170,42 @@ class HostRouter:
             )
         await self.app_for_host(host)(scope, receive, send)
 
-    async def _lifespan(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Run every child's lifespan under one parent lifespan.
 
-        Starlette propagates lifespan only into apps reached through routing, so
-        the children are entered explicitly here. They share a single
-        ``AsyncExitStack``, which unwinds in reverse on shutdown and on a failed
-        startup alike.
-        """
-        started = False
-        try:
-            async with AsyncExitStack() as stack:
-                message = await receive()
-                assert message["type"] == "lifespan.startup"
-                for child in self._children:
-                    await stack.enter_async_context(child.lifespan(child))
-                await send({"type": "lifespan.startup.complete"})
-                started = True
+@asynccontextmanager
+async def enter_lifespans(children: Iterable[LifespanApp]) -> AsyncIterator[None]:
+    """Run every child's lifespan under one parent lifespan.
 
-                message = await receive()
-                assert message["type"] == "lifespan.shutdown"
-        except BaseException as exc:
-            phase = "shutdown" if started else "startup"
-            await send({"type": f"lifespan.{phase}.failed", "message": str(exc)})
-            raise
-        await send({"type": "lifespan.shutdown.complete"})
+    Starlette propagates lifespan only into apps reached through routing, so a
+    router enters its children explicitly. They share a single
+    ``AsyncExitStack``, which unwinds in reverse on shutdown and on a failed
+    startup alike.
+    """
+    async with AsyncExitStack() as stack:
+        for child in children:
+            await stack.enter_async_context(child.lifespan(child))
+        yield
+
+
+async def serve_lifespan(
+    lifespan: AbstractAsyncContextManager[None], receive: Receive, send: Send
+) -> None:
+    """Speak the ASGI lifespan protocol for a router around ``lifespan``.
+
+    A failure in either phase is reported to the server before it propagates,
+    so a half-started router never reports itself ready.
+    """
+    started = False
+    try:
+        message = await receive()
+        assert message["type"] == "lifespan.startup"
+        async with lifespan:
+            await send({"type": "lifespan.startup.complete"})
+            started = True
+
+            message = await receive()
+            assert message["type"] == "lifespan.shutdown"
+    except BaseException as exc:
+        phase = "shutdown" if started else "startup"
+        await send({"type": f"lifespan.{phase}.failed", "message": str(exc)})
+        raise
+    await send({"type": "lifespan.shutdown.complete"})

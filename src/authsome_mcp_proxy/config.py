@@ -14,6 +14,10 @@ Two transports, two config shapes:
   Outbound auth to the upstream MCP server is independently configurable
   via ``outbound_auth``.
 
+A ``WebConfig`` fronts either one upstream MCP server, served at ``/mcp``, or
+several, each described by an ``UpstreamRoute`` and served at ``/<name>/mcp``
+behind one shared OAuth identity (see :mod:`authsome_mcp_proxy.path_router`).
+
 The pattern this proxy serves in web mode depends on what credential the
 operator plugs in for outbound auth -- see the *MCP Server Auth Architecture
 Patterns* write-up. Primary target is Pattern C (``outbound_auth='forward'``).
@@ -24,8 +28,9 @@ B.2 is determined by the scope of the configured credential, not by which
 mechanism is used).
 """
 
+import re
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, get_args
 
 AuthProvider: TypeAlias = Literal["oidc", "keycloak", "aws-cognito", "google", "azure"]
 """Inbound auth provider type for web mode.
@@ -46,10 +51,15 @@ Two distinct patterns are dispatched:
   IdP.
 """
 
-OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "static"]
+OutboundAuthMode: TypeAlias = Literal[
+    "forward", "none", "oauth-client-credentials", "static"
+]
 """Outbound auth mechanism the proxy uses when calling the upstream MCP.
 
 - ``forward`` -- reuse the downstream session's bearer token (Pattern C).
+- ``none`` -- send no credential at all, for an upstream that validates none,
+  such as a read-only knowledge server. The user's token is withheld rather
+  than handed to a server that has no use for it.
 - ``oauth-client-credentials`` -- proxy obtains its own token via OAuth
   client-credentials grant against an outbound token endpoint independent
   of the inbound IdP.
@@ -57,6 +67,109 @@ OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "st
   keys, API tokens, and personal access tokens (PATs) uniformly -- same wire
   shape under different upstream vocabularies.
 """
+
+OUTBOUND_AUTH_MODES: tuple[OutboundAuthMode, ...] = get_args(OutboundAuthMode)
+
+_ROUTE_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+
+
+def _validate_outbound_settings(
+    outbound_auth: str,
+    *,
+    client_id: str | None,
+    client_secret: str | None,
+    token_url: str | None,
+    header_value: str | None,
+    context: str = "",
+) -> None:
+    """Check that an outbound mode is known and has the fields it needs.
+
+    Shared by ``WebConfig`` and ``UpstreamRoute``; ``context`` prefixes the
+    message so that a route's error names the route.
+    """
+    if outbound_auth not in OUTBOUND_AUTH_MODES:
+        raise ValueError(
+            f"{context}outbound_auth must be one of {', '.join(OUTBOUND_AUTH_MODES)}"
+            f" -- got {outbound_auth!r}"
+        )
+    if outbound_auth == "oauth-client-credentials":
+        missing = [
+            name
+            for name, value in (
+                ("outbound_client_id", client_id),
+                ("outbound_client_secret", client_secret),
+                ("outbound_token_url", token_url),
+            )
+            if not value
+        ]
+        if missing:
+            raise ValueError(
+                f"{context}outbound_auth='oauth-client-credentials' requires "
+                f"{', '.join(missing)}"
+            )
+    elif outbound_auth == "static":
+        if not header_value:
+            raise ValueError(
+                f"{context}outbound_auth='static' requires outbound_header_value"
+            )
+
+
+@dataclass
+class UpstreamRoute:
+    """One of several upstream MCP servers a web-mode proxy fronts.
+
+    The route is served at ``/<name>/mcp`` with its own protected-resource
+    metadata at ``/.well-known/oauth-protected-resource/<name>/mcp``, and
+    shares the proxy's OAuth identity with every other route: one sign-in
+    covers them all.
+
+    Every field after ``mcp_url`` means the same as its namesake on
+    ``WebConfig`` but applies to this route only. The values are final:
+    falling back to the global setting for whatever was left unset is the job
+    of whoever builds the route -- the CLI does it for the
+    ``UPSTREAM_<NAME>_*`` environment variables.
+
+    Attributes:
+        name: Route name, also the first path segment. Lower-case letters,
+            digits and ``-``, starting with a letter or digit.
+        mcp_url: URL of the upstream MCP server.
+    """
+
+    name: str
+    mcp_url: str
+    outbound_auth: OutboundAuthMode = "forward"
+    outbound_client_id: str | None = None
+    outbound_client_secret: str | None = None
+    outbound_token_url: str | None = None
+    outbound_header_name: str = "Authorization"
+    outbound_header_value: str | None = None
+
+    proxy_name: str | None = None
+    proxy_version: str | None = None
+    proxy_instructions: str | None = None
+    proxy_website_url: str | None = None
+
+    def __post_init__(self) -> None:
+        if not _ROUTE_NAME.fullmatch(self.name):
+            raise ValueError(
+                f"upstream name {self.name!r} must match {_ROUTE_NAME.pattern!r}: "
+                "it becomes a path segment and part of environment variable names"
+            )
+        if not self.mcp_url:
+            raise ValueError(f"upstream {self.name!r} requires mcp_url")
+        _validate_outbound_settings(
+            self.outbound_auth,
+            client_id=self.outbound_client_id,
+            client_secret=self.outbound_client_secret,
+            token_url=self.outbound_token_url,
+            header_value=self.outbound_header_value,
+            context=f"upstream {self.name!r}: ",
+        )
+
+    @property
+    def path(self) -> str:
+        """The path this route's MCP endpoint is served at."""
+        return f"/{self.name}/mcp"
 
 
 @dataclass
@@ -172,6 +285,20 @@ class WebConfig:
         proxy_instructions: Instructions the LLM sees alongside the
             tool catalog -- influences tool selection.
         proxy_website_url: Project URL shown in client UIs.
+
+    Several upstreams (web mode only):
+        upstreams: Upstream MCP servers to serve side by side, each at
+            ``/<name>/mcp`` and each with its own outbound auth and advertised
+            identity. Empty by default: the proxy then fronts the single
+            upstream URL it is started with, at ``/mcp``, using the outbound
+            and identity fields above. When set, those fields are not used
+            directly -- every route carries its own -- and no single upstream
+            URL may be given. All routes share one OAuth identity per public
+            hostname; see :mod:`authsome_mcp_proxy.path_router`.
+        default_upstream: Name of the route that is additionally served at
+            ``/mcp`` with its protected-resource metadata at
+            ``/.well-known/oauth-protected-resource/mcp``, so clients of a
+            former single-upstream deployment keep working. Optional.
     """
 
     inbound_auth_provider: AuthProvider
@@ -208,10 +335,17 @@ class WebConfig:
     proxy_instructions: str | None = None
     proxy_website_url: str | None = None
 
+    upstreams: list[UpstreamRoute] = field(default_factory=list)
+    default_upstream: str | None = None
+
     def __post_init__(self) -> None:
         self._validate_base_urls()
         self._validate_inbound()
-        self._validate_outbound()
+        self._validate_upstreams()
+        if not self.upstreams:
+            # With several upstreams each route validates its own settings;
+            # the top-level ones are unused and may be incomplete.
+            self._validate_outbound()
 
     @property
     def all_proxy_base_urls(self) -> list[str]:
@@ -278,26 +412,32 @@ class WebConfig:
                 # AzureProvider's required_scopes is a mandatory list[str].
                 raise ValueError("inbound_auth_provider='azure' requires scopes")
 
+    def _validate_upstreams(self) -> None:
+        names = [route.name for route in self.upstreams]
+        duplicates = sorted({name for name in names if names.count(name) > 1})
+        if duplicates:
+            raise ValueError(
+                f"upstream names must be unique; duplicated: {', '.join(duplicates)}"
+            )
+        if self.default_upstream is not None and self.default_upstream not in names:
+            if not names:
+                raise ValueError(
+                    "default_upstream requires upstreams: it names the one of "
+                    "several upstreams that is also served at /mcp"
+                )
+            raise ValueError(
+                f"default_upstream {self.default_upstream!r} is not among the "
+                f"upstreams {names!r}"
+            )
+
     def _validate_outbound(self) -> None:
-        if self.outbound_auth == "oauth-client-credentials":
-            missing = [
-                name
-                for name, value in (
-                    ("outbound_client_id", self.outbound_client_id),
-                    ("outbound_client_secret", self.outbound_client_secret),
-                    ("outbound_token_url", self.outbound_token_url),
-                )
-                if not value
-            ]
-            if missing:
-                raise ValueError(
-                    f"outbound_auth='oauth-client-credentials' requires {', '.join(missing)}"
-                )
-        elif self.outbound_auth == "static":
-            if not self.outbound_header_value:
-                raise ValueError(
-                    "outbound_auth='static' requires outbound_header_value"
-                )
+        _validate_outbound_settings(
+            self.outbound_auth,
+            client_id=self.outbound_client_id,
+            client_secret=self.outbound_client_secret,
+            token_url=self.outbound_token_url,
+            header_value=self.outbound_header_value,
+        )
 
 
 ProxyConfig: TypeAlias = DesktopConfig | WebConfig

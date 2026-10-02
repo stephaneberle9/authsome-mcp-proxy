@@ -5,7 +5,11 @@ from unittest.mock import Mock, patch
 import pytest
 
 from authsome_mcp_proxy.config import WebConfig
-from authsome_mcp_proxy.inbound_auth import _disable_cimd, build_inbound_auth
+from authsome_mcp_proxy.inbound_auth import (
+    _disable_cimd,
+    build_inbound_auth,
+    share_authorization_server,
+)
 
 
 def _cognito_config(**overrides) -> WebConfig:
@@ -272,3 +276,147 @@ class TestCimdToggle:
 
         assert "enable_cimd" not in mock_class.call_args.kwargs
         mock_disable.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# One authorization server for several MCP endpoints
+# ---------------------------------------------------------------------------
+
+
+class TestShareAuthorizationServer:
+    """share_authorization_server widens an OAuthProxy from one endpoint to all
+    the endpoints of an identity. The end-to-end effect is covered in
+    test_path_router_integration; these pin down the mechanism."""
+
+    BASE = "https://mcp.example.com"
+    RESOURCES = (f"{BASE}/a/mcp", f"{BASE}/b/mcp", f"{BASE}/mcp")
+
+    @pytest.fixture
+    def provider(self, tmp_path, monkeypatch):
+        """A real OIDCProxy, bound to two endpoints the way two apps bind it."""
+        import fastmcp
+        from fastmcp.server.auth.oidc_proxy import OIDCConfiguration, OIDCProxy
+
+        monkeypatch.setattr(fastmcp.settings, "home", tmp_path)
+        discovery = OIDCConfiguration(
+            issuer="https://idp.example.com",
+            authorization_endpoint="https://idp.example.com/authorize",
+            token_endpoint="https://idp.example.com/token",
+            jwks_uri="https://idp.example.com/jwks",
+            response_types_supported=["code"],
+            subject_types_supported=["public"],
+            id_token_signing_alg_values_supported=["RS256"],
+        )
+        config = WebConfig(
+            inbound_auth_provider="oidc",
+            proxy_base_url=self.BASE,
+            issuer_url="https://idp.example.com",
+            client_id="cid",
+            client_secret="csec",
+        )
+        with patch.object(OIDCProxy, "get_oidc_configuration", return_value=discovery):
+            provider = build_inbound_auth(config)
+        provider.get_routes(mcp_path="/a/mcp")
+        provider.get_routes(mcp_path="/b/mcp")
+        return provider
+
+    @staticmethod
+    def _params(resource):
+        from mcp.server.auth.provider import AuthorizationParams
+        from pydantic import AnyUrl
+
+        return AuthorizationParams(
+            state="s",
+            scopes=None,
+            code_challenge="challenge",
+            redirect_uri=AnyUrl("http://localhost:3000/callback"),
+            redirect_uri_provided_explicitly=True,
+            resource=resource,
+        )
+
+    def test_without_it_the_last_endpoint_wins(self, provider):
+        """The problem being solved, pinned so a FastMCP change shows up here:
+        every get_routes call rebinds the one provider."""
+        assert str(provider._resource_url) == f"{self.BASE}/b/mcp"
+        assert provider.jwt_issuer.audience == f"{self.BASE}/b/mcp"
+
+    def test_binds_tokens_to_the_base_url(self, provider):
+        share_authorization_server(provider, self.RESOURCES)
+        assert provider.jwt_issuer.audience == f"{self.BASE}/"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "resource",
+        [
+            f"{BASE}/a/mcp",
+            f"{BASE}/b/mcp",
+            f"{BASE}/mcp",
+            f"{BASE}/a/mcp/",
+            # ChatGPT appends query parameters; FastMCP ignores them too.
+            f"{BASE}/a/mcp?kb_name=x",
+            None,
+        ],
+    )
+    async def test_passes_every_served_resource_on_unchanged(self, provider, resource):
+        """Unchanged, so the IdP is forwarded the same resource as in a
+        single-endpoint deployment."""
+        from unittest.mock import AsyncMock
+
+        provider.authorize = AsyncMock(return_value="https://next")
+        original = provider.authorize
+        share_authorization_server(provider, self.RESOURCES)
+        client, params = Mock(), self._params(resource)
+
+        assert await provider.authorize(client, params) == "https://next"
+        original.assert_awaited_once_with(client, params)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "resource",
+        ["https://elsewhere.example.com/a/mcp", f"{BASE}/c/mcp", f"{BASE}/"],
+    )
+    async def test_refuses_any_other_resource(self, provider, resource):
+        from unittest.mock import AsyncMock
+
+        from mcp.server.auth.provider import AuthorizeError
+
+        provider.authorize = AsyncMock()
+        original = provider.authorize
+        share_authorization_server(provider, self.RESOURCES)
+
+        with pytest.raises(AuthorizeError) as raised:
+            await provider.authorize(Mock(), self._params(resource))
+        assert raised.value.error == "invalid_target"
+        original.assert_not_awaited()
+
+    def test_leaves_a_remote_auth_provider_alone(self):
+        """keycloak: Keycloak is the authorization server, and nothing on the
+        proxy side is bound to one endpoint."""
+        config = WebConfig(
+            inbound_auth_provider="keycloak",
+            proxy_base_url=self.BASE,
+            issuer_url="https://kc.example.com/realms/r",
+        )
+        provider = build_inbound_auth(config)
+        provider.get_routes(mcp_path="/a/mcp")
+
+        share_authorization_server(provider, self.RESOURCES)
+
+        assert str(provider._resource_url) == f"{self.BASE}/a/mcp"
+        assert "authorize" not in vars(provider)
+
+    def test_fails_loudly_when_tokens_are_not_bound_to_the_base_url(
+        self, provider, monkeypatch
+    ):
+        """If FastMCP stops deriving the audience from the resource URL, one
+        sign-in would silently stop covering every route."""
+        monkeypatch.setattr(type(provider), "set_mcp_path", lambda self, path: None)
+        with pytest.raises(RuntimeError, match="rather than the base URL"):
+            share_authorization_server(provider, self.RESOURCES)
+
+    def test_refuses_a_provider_with_identity_assertion(self, provider):
+        """The jwt-bearer grant checks its resource against the same single URL;
+        clearing it would switch that check off without replacing it."""
+        provider._identity_assertion = Mock()
+        with pytest.raises(RuntimeError, match="identity assertion"):
+            share_authorization_server(provider, self.RESOURCES)
