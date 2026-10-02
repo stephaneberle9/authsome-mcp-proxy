@@ -14,6 +14,11 @@ precedence). For stdio mode the ``OIDC_*`` env vars apply; for http mode
 the inbound provider params (``OIDC_*``, ``COGNITO_*``, ``AZURE_*``,
 ``--audience``, ``--proxy-base-url``, ``ENABLE_CIMD``) and the outbound mode
 params (``OUTBOUND_*``) apply.
+
+Several upstreams (http mode only) are named by ``UPSTREAMS`` or repeated
+``--upstream NAME=URL`` flags. Their per-route settings are environment-only,
+``UPSTREAM_<NAME>_<SETTING>`` with ``<NAME>`` upper-cased and ``-`` turned into
+``_``; each one falls back to the matching global setting.
 """
 
 import argparse
@@ -27,12 +32,35 @@ from exceptiongroup import BaseExceptionGroup
 from mcp.shared.exceptions import MCPError
 
 from . import __version__, mcp_proxy
-from .config import OUTBOUND_AUTH_MODES, DesktopConfig, ProxyConfig, WebConfig
+from .config import (
+    OUTBOUND_AUTH_MODES,
+    DesktopConfig,
+    ProxyConfig,
+    UpstreamRoute,
+    WebConfig,
+)
 
 logger = logging.getLogger(__name__)
 
 
 _INBOUND_AUTH_PROVIDERS = ("oidc", "keycloak", "aws-cognito", "google", "azure")
+
+# Per-route settings of a multi-upstream deployment, as (field, suffix, global):
+# read from UPSTREAM_<NAME>_<suffix>, falling back to the global setting --
+# the args attribute of the same field name, set from the `global` variable or
+# its flag. The field is also the UpstreamRoute field.
+_ROUTE_SETTINGS = (
+    ("outbound_auth", "OUTBOUND_AUTH", "OUTBOUND_AUTH"),
+    ("outbound_client_id", "OUTBOUND_CLIENT_ID", "OUTBOUND_CLIENT_ID"),
+    ("outbound_client_secret", "OUTBOUND_CLIENT_SECRET", "OUTBOUND_CLIENT_SECRET"),
+    ("outbound_token_url", "OUTBOUND_TOKEN_URL", "OUTBOUND_TOKEN_URL"),
+    ("outbound_header_name", "OUTBOUND_HEADER_NAME", "OUTBOUND_HEADER_NAME"),
+    ("outbound_header_value", "OUTBOUND_HEADER_VALUE", "OUTBOUND_HEADER_VALUE"),
+    ("proxy_name", "PROXY_NAME", "MCP_PROXY_NAME"),
+    ("proxy_version", "PROXY_VERSION", "MCP_PROXY_VERSION"),
+    ("proxy_instructions", "PROXY_INSTRUCTIONS", "MCP_PROXY_INSTRUCTIONS"),
+    ("proxy_website_url", "PROXY_WEBSITE_URL", "MCP_PROXY_WEBSITE_URL"),
+)
 
 _TRUTHY = ("1", "true", "yes", "on")
 _FALSY = ("0", "false", "no", "off")
@@ -60,6 +88,37 @@ def _env_flag(name: str, *, default: bool) -> bool:
     )
 
 
+_ROUTE_SETTINGS_EPILOG = (
+    "Several upstreams (--upstream / UPSTREAMS) take their per-upstream settings "
+    "from the environment only, as UPSTREAM_<NAME>_<SETTING> with <NAME> "
+    "upper-cased and '-' turned into '_'. Each is optional and falls back to the "
+    "global setting named in brackets: "
+    + ", ".join(
+        f"UPSTREAM_<NAME>_{suffix} ({global_name})"
+        for _, suffix, global_name in _ROUTE_SETTINGS
+    )
+    + "."
+)
+
+
+def _upstream_arg(raw: str) -> tuple[str, str]:
+    """Parse one ``--upstream NAME=URL`` value.
+
+    Only the shape is checked here; the name's syntax is validated with the
+    rest of the configuration, so the message is the same however the route
+    was configured.
+    """
+    name, sep, url = raw.partition("=")
+    if not sep or not name.strip() or not url.strip():
+        raise argparse.ArgumentTypeError(f"expected NAME=URL, got {raw!r}")
+    return name.strip(), url.strip()
+
+
+def _route_env_prefix(name: str) -> str:
+    """The environment variable prefix of a route: ``emb3d-kb`` -> ``UPSTREAM_EMB3D_KB_``."""
+    return f"UPSTREAM_{name.upper().replace('-', '_')}_"
+
+
 def cli() -> argparse.Namespace:
     """
     Parse command line arguments and merge with environment variables.
@@ -77,7 +136,8 @@ def cli() -> argparse.Namespace:
             f"by token validation or static credentials to MCP clients such as "
             f"Claude Desktop, Claude Code, Cursor, Codex, MCP Inspector, "
             f"and Claude.ai (version {__version__})"
-        )
+        ),
+        epilog=_ROUTE_SETTINGS_EPILOG,
     )
 
     # Proxy server arguments
@@ -87,6 +147,27 @@ def cli() -> argparse.Namespace:
         nargs="?",
         help="URL of the upstream MCP server to be proxied "
         "(can also be set via UPSTREAM_MCP_URL env var)",
+    )
+    parser.add_argument(
+        "--upstream",
+        dest="upstreams",
+        metavar="NAME=URL",
+        action="append",
+        type=_upstream_arg,
+        default=None,
+        help="Serve the upstream MCP server at URL under /NAME/mcp; repeat for "
+        "several upstreams behind one OAuth identity -- http mode only. Replaces "
+        "the positional UPSTREAM_MCP_URL. NAME: lower-case letters, digits and "
+        "'-'. Can also be set via UPSTREAMS=NAME,NAME,... with each URL in "
+        "UPSTREAM_<NAME>_MCP_URL. Per-upstream settings: see below.",
+    )
+    parser.add_argument(
+        "--default-upstream",
+        metavar="NAME",
+        default=None,
+        help="Also serve upstream NAME at /mcp, the path of a single-upstream "
+        "deployment, so its existing clients keep working "
+        "(can also be set via DEFAULT_UPSTREAM env var)",
     )
     parser.add_argument(
         "--no-banner",
@@ -352,10 +433,29 @@ def _apply_env_fallbacks(args: argparse.Namespace) -> None:
         ("proxy_version", "MCP_PROXY_VERSION"),
         ("proxy_instructions", "MCP_PROXY_INSTRUCTIONS"),
         ("proxy_website_url", "MCP_PROXY_WEBSITE_URL"),
+        ("default_upstream", "DEFAULT_UPSTREAM"),
     )
     for attr, env_name in env_fallbacks:
         if not getattr(args, attr):
             setattr(args, attr, os.getenv(env_name))
+
+    if not args.upstreams:
+        # Unlike the flag, the list carries names only; each URL has a variable
+        # of its own. A missing one is reported by build_proxy_config.
+        args.upstreams = [
+            (name, os.getenv(f"{_route_env_prefix(name)}MCP_URL"))
+            for name in _split_list(os.getenv("UPSTREAMS") or "")
+        ]
+    # Per-route settings are environment-only. Read now, while the environment
+    # is the one cli() runs against; the fallback to the global settings is
+    # applied when the routes are built.
+    args.upstream_settings = {
+        name: {
+            field: os.getenv(f"{_route_env_prefix(name)}{suffix}") or None
+            for field, suffix, _ in _ROUTE_SETTINGS
+        }
+        for name, _ in args.upstreams
+    }
 
     if not args.transport:
         args.transport = os.getenv("MCP_PROXY_TRANSPORT") or "stdio"
@@ -370,18 +470,26 @@ def _apply_env_fallbacks(args: argparse.Namespace) -> None:
         args.enable_cimd = _env_flag("ENABLE_CIMD", default=True)
 
 
-def _split_base_urls(raw: str) -> list[str]:
-    """Split a comma-separated ``--proxy-base-url`` value into its entries.
+def _split_list(raw: str) -> list[str]:
+    """Split a comma-separated value into its non-blank, stripped entries.
 
     Blank entries are dropped so a trailing comma, or the line continuations
     that creep into Kubernetes manifests and .env files, don't produce an
+    empty entry.
+    """
+    return [entry for entry in (part.strip() for part in raw.split(",")) if entry]
+
+
+def _split_base_urls(raw: str) -> list[str]:
+    """Split a comma-separated ``--proxy-base-url`` value into its entries.
+
+    Blank entries are dropped (see :func:`_split_list`), so none becomes an
     identity with an empty hostname.
 
     Raises:
         ValueError: If nothing usable remains.
     """
-    base_urls = [entry.strip() for entry in raw.split(",")]
-    base_urls = [entry for entry in base_urls if entry]
+    base_urls = _split_list(raw)
     if not base_urls:
         raise ValueError(
             "--proxy-base-url (or MCP_PROXY_BASE_URL env var) contains no usable URL"
@@ -401,9 +509,16 @@ def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
       level fields (e.g. ``--proxy-base-url``) are caught here.
 
     Raises:
-        ValueError: If required transport-level fields are missing.
+        ValueError: If required transport-level fields are missing, or if
+            several upstreams are configured for stdio mode or alongside a
+            single upstream URL.
     """
     if args.transport == "stdio":
+        if args.upstreams or args.default_upstream:
+            raise ValueError(
+                "UPSTREAMS / --upstream and DEFAULT_UPSTREAM / --default-upstream "
+                "require --transport http: only web mode serves several upstreams"
+            )
         return DesktopConfig(
             issuer_url=args.oidc_issuer_url,
             client_id=args.oidc_client_id,
@@ -421,6 +536,13 @@ def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
         raise ValueError(
             "--inbound-auth-provider (or INBOUND_AUTH_PROVIDER env var) is required for "
             "--transport http"
+        )
+
+    if args.upstreams and args.upstream_mcp_url:
+        raise ValueError(
+            "UPSTREAMS (or --upstream) and UPSTREAM_MCP_URL (or the positional URL) "
+            "are mutually exclusive: name every upstream in UPSTREAMS, and give the "
+            "one existing clients use DEFAULT_UPSTREAM to keep it at /mcp"
         )
 
     canonical_base_url, *additional_base_urls = _split_base_urls(args.proxy_base_url)
@@ -449,7 +571,37 @@ def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
         proxy_version=args.proxy_version,
         proxy_instructions=args.proxy_instructions,
         proxy_website_url=args.proxy_website_url,
+        upstreams=_build_upstream_routes(args),
+        default_upstream=args.default_upstream,
     )
+
+
+def _build_upstream_routes(args: argparse.Namespace) -> list[UpstreamRoute]:
+    """Build the routes of a multi-upstream deployment from parsed args.
+
+    Each setting comes from the route's own ``UPSTREAM_<NAME>_*`` variable,
+    else from the global flag or variable, else from the global default.
+
+    Raises:
+        ValueError: If a route has no URL, or a route fails validation.
+    """
+    routes = []
+    for name, url in args.upstreams:
+        if not url:
+            raise ValueError(
+                f"{_route_env_prefix(name)}MCP_URL is required for upstream {name!r} "
+                "listed in UPSTREAMS"
+            )
+        own = args.upstream_settings[name]
+        settings = {
+            field: own[field] or getattr(args, field) for field, _, _ in _ROUTE_SETTINGS
+        }
+        settings["outbound_auth"] = settings["outbound_auth"] or "forward"
+        settings["outbound_header_name"] = (
+            settings["outbound_header_name"] or "Authorization"
+        )
+        routes.append(UpstreamRoute(name=name, mcp_url=url, **settings))
+    return routes
 
 
 class _LowercaseLevelFormatter(logging.Formatter):

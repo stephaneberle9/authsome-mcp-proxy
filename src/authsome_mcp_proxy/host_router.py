@@ -30,8 +30,9 @@ Only hostnames derived from configured base URLs are ever matched -- the ``Host`
 header selects among them but never defines one, so a forged header can at worst
 reach an identity the operator already published.
 
-The lifespan helpers at the bottom are module-level so that a router nested
-inside this one can enter its own children the same way.
+The lifespan helpers at the bottom are shared with
+:mod:`authsome_mcp_proxy.path_router`, whose router nests inside this one when a
+hostname fronts several upstreams.
 """
 
 from __future__ import annotations

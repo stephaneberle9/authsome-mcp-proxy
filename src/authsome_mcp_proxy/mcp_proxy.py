@@ -20,32 +20,40 @@ MCP proxy with two operating modes selected by config type.
 Both paths converge on FastMCP's ``create_proxy`` + per-session
 ``client.new()`` model so each downstream session gets an isolated
 upstream connection.
+
+In web mode a single proxy can also front several upstreams
+(``WebConfig.upstreams``): one proxy server per upstream, each at
+``/<name>/mcp``, behind one OAuth identity per public hostname -- see
+:mod:`authsome_mcp_proxy.path_router`.
 """
 
 import logging
-from typing import Any
+from collections.abc import Mapping
+from contextlib import AsyncExitStack
+from typing import Any, cast
 
 import fastmcp
 import httpx2
 import uvicorn
-from fastmcp import Client
+from fastmcp import Client, FastMCP
 from fastmcp.server import create_proxy
 from fastmcp.server.http import create_streamable_http_app
 from fastmcp.utilities.logging import temporary_log_level
 from starlette.middleware import Middleware as ASGIMiddleware
 
-from .config import DesktopConfig, ProxyConfig, WebConfig
+from .config import DesktopConfig, ProxyConfig, UpstreamRoute, WebConfig
 from .external_oidc import ExternalOIDCAuth
 from .host_router import HostRouter
-from .inbound_auth import build_inbound_auth
+from .inbound_auth import build_inbound_auth, share_authorization_server
 from .outbound_auth import build_outbound_auth
+from .path_router import PathRouter
 from .upstream_identity import UpstreamIdentityMiddleware
 
 logger = logging.getLogger(__name__)
 
 
 async def run_async(
-    upstream_url: str,
+    upstream_url: str | None,
     config: ProxyConfig,
     show_banner: bool = True,
     **transport_kwargs: Any,
@@ -57,7 +65,9 @@ async def run_async(
     stdio; ``WebConfig`` always runs over http.
 
     Args:
-        upstream_url: URL of the upstream MCP server to proxy.
+        upstream_url: URL of the upstream MCP server to proxy. Must be
+            ``None`` when ``config`` is a ``WebConfig`` with ``upstreams``,
+            which names its upstreams itself.
         config: Either a ``DesktopConfig`` (stdio mode) or a ``WebConfig``
             (http mode). Selects the auth strategy and transport.
         show_banner: Whether to display the server startup banner.
@@ -70,8 +80,10 @@ async def run_async(
 
     Raises:
         TypeError: If ``config`` is not a recognized ``ProxyConfig`` type.
-        ValueError: If ``transport`` is passed. It is derived from the config
-            type, so there is nothing to choose -- and both branches splat
+        ValueError: If ``upstream_url`` is missing, or given alongside
+            ``config.upstreams``. Also if ``transport`` is passed. It is
+            derived from the config type, so there is nothing to choose -- and
+            both branches splat
             ``transport_kwargs`` onto a call that already fixes it, which
             would otherwise surface as a "got multiple values for keyword
             argument 'transport'" naming a function the caller never called.
@@ -83,7 +95,17 @@ async def run_async(
             "want rather than a transport."
         )
 
+    upstreams = config.upstreams if isinstance(config, WebConfig) else []
+    if upstreams and upstream_url:
+        raise ValueError(
+            "upstream_url and config.upstreams are mutually exclusive: with several "
+            "upstreams, each route names its own URL"
+        )
+    if not upstreams and not upstream_url:
+        raise ValueError("upstream_url is required unless config.upstreams is set")
+
     if isinstance(config, DesktopConfig):
+        assert upstream_url is not None
         await _run_desktop(upstream_url, config, show_banner, **transport_kwargs)
     elif isinstance(config, WebConfig):
         await _run_web(upstream_url, config, show_banner, **transport_kwargs)
@@ -123,7 +145,7 @@ async def _run_desktop(
 
 
 async def _run_web(
-    upstream_url: str,
+    upstream_url: str | None,
     config: WebConfig,
     show_banner: bool,
     **transport_kwargs: Any,
@@ -141,8 +163,36 @@ async def _run_web(
 
     The single-hostname case runs the same way with one child app, which is why
     there is no second code path to keep in step.
+
+    With ``config.upstreams`` set, each route gets a proxy server of its own --
+    its own upstream client, outbound auth and relayed identity -- and every
+    hostname's identity serves all of their routes; see :func:`_serve_http`.
     """
-    outbound_auth = build_outbound_auth(config)
+    if config.upstreams:
+        servers = {
+            route.name: _build_web_proxy(route.mcp_url, route)
+            for route in config.upstreams
+        }
+        await _serve_http(servers, config, show_banner, **transport_kwargs)
+        return
+
+    assert upstream_url is not None
+    mcp_proxy = _build_web_proxy(upstream_url, config)
+    await _serve_http(mcp_proxy, config, show_banner, **transport_kwargs)
+
+
+def _build_web_proxy(upstream_url: str, settings: WebConfig | UpstreamRoute) -> FastMCP:
+    """Build the proxy server for one upstream, unauthenticated and not yet served.
+
+    ``settings`` supplies the outbound auth and the operator-configured
+    identity: the ``WebConfig`` itself for a single upstream, the route for
+    one of several.
+
+    Nothing connects to the upstream here. FastMCP opens a connection per
+    downstream session, so the proxy starts -- and keeps serving its other
+    routes -- while an upstream is down; requests to that one fail on their own.
+    """
+    outbound_auth = build_outbound_auth(settings)
 
     # The stdio path's pre-flight relay cannot run here: with
     # outbound_auth='forward' there is no inbound session yet to borrow a
@@ -150,11 +200,11 @@ async def _run_web(
     # without them FastMCP falls back to its auto-generated FastMCPProxy-xxxx
     # name -- and the upstream's instructions, website URL and icons are
     # relayed per handshake by UpstreamIdentityMiddleware instead.
-    proxy_kwargs = _server_identity_kwargs(config)
+    proxy_kwargs = _server_identity_kwargs(settings)
     proxy_client = Client(transport=upstream_url, auth=outbound_auth)
 
-    # No auth= here: it is supplied per app below. The server is never served
-    # through its own http_app(), which would be unauthenticated.
+    # No auth= here: it is supplied per app by _serve_http. The server is never
+    # served through its own http_app(), which would be unauthenticated.
     mcp_proxy = create_proxy(proxy_client, **proxy_kwargs)
     mcp_proxy.add_middleware(
         UpstreamIdentityMiddleware(
@@ -162,12 +212,11 @@ async def _run_web(
             configured_fields=proxy_kwargs.keys(),
         )
     )
-
-    await _serve_http(mcp_proxy, config, show_banner, **transport_kwargs)
+    return mcp_proxy
 
 
 async def _serve_http(
-    mcp_proxy: Any,
+    mcp_proxy: FastMCP | Mapping[str, FastMCP],
     config: WebConfig,
     /,
     show_banner: bool = True,
@@ -182,7 +231,7 @@ async def _serve_http(
     stateless: bool | None = None,
     middleware: list[ASGIMiddleware] | None = None,
 ) -> None:
-    """Serve one ASGI app per configured base URL behind a host router.
+    """Serve one identity per configured base URL behind a host router.
 
     Mirrors ``FastMCP.run_http_async`` -- same settings fallbacks, same uvicorn
     configuration, same keyword surface -- but builds N apps instead of one.
@@ -200,13 +249,18 @@ async def _serve_http(
     otherwise be shadowable by a caller's ``**transport_kwargs``.
 
     Args:
-        mcp_proxy: The shared FastMCP server backing every identity.
+        mcp_proxy: The shared FastMCP server backing every identity -- or,
+            with ``config.upstreams`` set, a mapping of upstream name to that
+            upstream's server.
         config: Web-mode configuration; supplies the base URLs to serve.
         show_banner: Whether to display the server startup banner.
         host: Bind address. Defaults to FastMCP's setting.
         port: Bind port. Defaults to FastMCP's setting.
         log_level: Log level for the duration of the run.
         path: Path the MCP endpoint is mounted at, shared by every identity.
+            With several upstreams, the path the default upstream is
+            additionally served at; each upstream's own route is always
+            ``/<name>/mcp``.
         uvicorn_config: Extra uvicorn ``Config`` kwargs, merged over the
             defaults. Note that ``lifespan="off"`` would stop every child app's
             session manager from ever starting.
@@ -215,7 +269,8 @@ async def _serve_http(
             sessions enabled each identity keeps its own session store, since
             each has its own app -- a session opened against one hostname is
             not resumable against another. That is the intended boundary: they
-            are separate OAuth resources.
+            are separate OAuth resources. The same holds for each upstream's
+            route within one identity.
         stateless: Alias for ``stateless_http``, matching FastMCP's CLI.
         middleware: ASGI middleware applied to every identity's app. Starlette
             instantiates these per app, so one list is safe to share.
@@ -232,30 +287,30 @@ async def _serve_http(
         log_level if log_level is not None else fastmcp.settings.log_level
     ).lower()
 
-    apps = {
-        base_url: create_streamable_http_app(
-            server=mcp_proxy,
-            streamable_http_path=mcp_path,
-            auth=build_inbound_auth(config, base_url=base_url),
-            json_response=(
-                json_response
-                if json_response is not None
-                else fastmcp.settings.json_response
-            ),
-            stateless_http=(
-                stateless_http
-                if stateless_http is not None
-                else fastmcp.settings.stateless_http
-            ),
-            debug=fastmcp.settings.debug,
-            middleware=middleware,
-        )
-        for base_url in config.all_proxy_base_urls
-    }
-    app = HostRouter(apps, canonical_base_url=config.proxy_base_url)
+    routes = _route_servers(mcp_proxy, config, mcp_path)
+    app = _build_http_app(
+        routes,
+        config,
+        json_response=(
+            json_response
+            if json_response is not None
+            else fastmcp.settings.json_response
+        ),
+        stateless_http=(
+            stateless_http
+            if stateless_http is not None
+            else fastmcp.settings.stateless_http
+        ),
+        debug=fastmcp.settings.debug,
+        middleware=middleware,
+    )
+    # One server per upstream; the default one also backs the /mcp alias.
+    servers = list({id(server): server for server in routes.values()}.values())
 
-    if show_banner:
-        log_server_banner(server=mcp_proxy)
+    # The banner names one server. With several, the "Serving ..." lines below
+    # list every route instead.
+    if show_banner and len(servers) == 1:
+        log_server_banner(server=servers[0])
 
     config_kwargs: dict[str, Any] = {
         "timeout_graceful_shutdown": 2,
@@ -267,16 +322,102 @@ async def _serve_http(
         config_kwargs["log_level"] = resolved_log_level
 
     with temporary_log_level(log_level):
-        async with mcp_proxy._lifespan_manager():
+        async with AsyncExitStack() as stack:
+            for server in servers:
+                await stack.enter_async_context(server._lifespan_manager())
             for base_url in config.all_proxy_base_urls:
-                logger.info("Serving MCP proxy at %s%s", base_url.rstrip("/"), mcp_path)
-            server = uvicorn.Server(
+                for route_path in routes:
+                    logger.info(
+                        "Serving MCP proxy at %s%s", base_url.rstrip("/"), route_path
+                    )
+            uvicorn_server = uvicorn.Server(
                 uvicorn.Config(app, host=host, port=port, **config_kwargs)
             )
-            await server.serve()
+            await uvicorn_server.serve()
 
 
-def _server_identity_kwargs(config: WebConfig) -> dict[str, Any]:
+def _route_servers(
+    mcp_proxy: FastMCP | Mapping[str, FastMCP], config: WebConfig, mcp_path: str
+) -> dict[str, FastMCP]:
+    """Map the path of every route an identity serves to the server behind it.
+
+    A single upstream has one route, at ``mcp_path``. Several upstreams each
+    have one at ``/<name>/mcp``, and the default upstream a second one at
+    ``mcp_path``. The first route's app also answers every non-MCP path, the
+    authorization server's among them: the default upstream's ``mcp_path``
+    route when there is one, otherwise the first upstream's.
+
+    Raises:
+        TypeError: If ``mcp_proxy`` is a mapping without ``config.upstreams``,
+            or a single server with them.
+        ValueError: If ``mcp_path`` collides with an upstream's own route.
+    """
+    if isinstance(mcp_proxy, Mapping) != bool(config.upstreams):
+        raise TypeError(
+            "pass one server per upstream if and only if config.upstreams is set"
+        )
+    if not config.upstreams:
+        return {mcp_path: cast("FastMCP", mcp_proxy)}
+
+    servers = cast("Mapping[str, FastMCP]", mcp_proxy)
+    routes = {upstream.path: servers[upstream.name] for upstream in config.upstreams}
+    if config.default_upstream is None:
+        return routes
+    if mcp_path in routes:
+        raise ValueError(
+            f"path {mcp_path!r} for the default upstream is already the route of "
+            "one of the upstreams"
+        )
+    return {mcp_path: servers[config.default_upstream], **routes}
+
+
+def _build_http_app(
+    routes: Mapping[str, FastMCP], config: WebConfig, **app_kwargs: Any
+) -> HostRouter:
+    """Build the ASGI app: one identity per base URL, each serving ``routes``.
+
+    ``app_kwargs`` are passed to every ``create_streamable_http_app`` call.
+    """
+    apps = {
+        base_url: _build_identity_app(routes, config, base_url, app_kwargs)
+        for base_url in config.all_proxy_base_urls
+    }
+    return HostRouter(apps, canonical_base_url=config.proxy_base_url)
+
+
+def _build_identity_app(
+    routes: Mapping[str, FastMCP],
+    config: WebConfig,
+    base_url: str,
+    app_kwargs: dict[str, Any],
+) -> Any:
+    """Build the app for one public base URL.
+
+    A single route is served by its app directly, exactly as before several
+    upstreams existed. Several share one auth provider -- one authorization
+    server for the whole identity -- and a path router in front; see
+    :mod:`authsome_mcp_proxy.path_router`.
+    """
+    auth = build_inbound_auth(config, base_url=base_url)
+    apps = {
+        route_path: create_streamable_http_app(
+            server=server,
+            streamable_http_path=route_path,
+            auth=auth,
+            **app_kwargs,
+        )
+        for route_path, server in routes.items()
+    }
+    if len(apps) == 1:
+        return next(iter(apps.values()))
+
+    share_authorization_server(
+        auth, [f"{base_url.rstrip('/')}{route_path}" for route_path in apps]
+    )
+    return PathRouter(apps, fallback=next(iter(apps)))
+
+
+def _server_identity_kwargs(config: WebConfig | UpstreamRoute) -> dict[str, Any]:
     """Collect operator-configured server-identity fields as create_proxy kwargs.
 
     Only includes fields the operator actually set. Unset fields are omitted so

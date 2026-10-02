@@ -36,7 +36,7 @@ import httpx2
 from fastmcp.server.dependencies import get_access_token
 
 if TYPE_CHECKING:
-    from .config import WebConfig
+    from .config import UpstreamRoute, WebConfig
 
 
 class ForwardSessionTokenAuth(httpx2.Auth):
@@ -200,7 +200,7 @@ class OAuthClientCredentialsAuth(httpx2.Auth):
         )
 
 
-def build_outbound_auth(config: WebConfig) -> httpx2.Auth:
+def build_outbound_auth(config: WebConfig | UpstreamRoute) -> httpx2.Auth:
     """Build an ``httpx2.Auth`` matching ``config.outbound_auth``.
 
     The returned auth instance is attached to the per-session ``Client``
@@ -209,9 +209,9 @@ def build_outbound_auth(config: WebConfig) -> httpx2.Auth:
     where the auth reads ContextVar-backed per-session state.
 
     Args:
-        config: Web-mode configuration. ``WebConfig.__post_init__`` has
-            already validated that all required per-mode fields are
-            populated.
+        config: Web-mode configuration, or one route of a multi-upstream
+            configuration. Its ``__post_init__`` has already validated that
+            all required per-mode fields are populated.
 
     Returns:
         An ``httpx2.Auth`` instance ready to plug into a per-session Client.

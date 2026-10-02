@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx2
 import pytest
 
-from authsome_mcp_proxy.config import WebConfig
+from authsome_mcp_proxy.config import UpstreamRoute, WebConfig
 from authsome_mcp_proxy.outbound_auth import (
     ForwardSessionTokenAuth,
     NoCredentialAuth,
@@ -83,6 +83,19 @@ class TestBuildOutboundAuthDispatch:
     def test_none_returns_no_credential_auth(self):
         config = WebConfig(**_base_keycloak_kwargs(), outbound_auth="none")
         assert isinstance(build_outbound_auth(config), NoCredentialAuth)
+
+    def test_builds_from_a_route_as_from_the_config(self):
+        """Several upstreams: each route carries its own outbound settings."""
+        route = UpstreamRoute(
+            name="kb",
+            mcp_url="http://kb/mcp",
+            outbound_auth="static",
+            outbound_header_name="X-API-Key",
+            outbound_header_value="kb-key",
+        )
+        auth = build_outbound_auth(route)
+        assert isinstance(auth, StaticHeaderAuth)
+        assert (auth.header_name, auth.header_value) == ("X-API-Key", "kb-key")
 
     def test_unknown_outbound_auth_raises(self):
         config = WebConfig(**_base_keycloak_kwargs())

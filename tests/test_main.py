@@ -853,3 +853,233 @@ class TestMultipleProxyBaseUrls:
     def test_duplicate_hostnames_are_rejected(self):
         with pytest.raises(ValueError, match="share the hostname"):
             self._config("https://mcp.example.com,https://mcp.example.com/other")
+
+
+# ---------------------------------------------------------------------------
+# Several upstreams
+# ---------------------------------------------------------------------------
+
+_HTTP_ARGS = [
+    "--transport",
+    "http",
+    "--proxy-base-url",
+    "https://mcp.example.com",
+    "--inbound-auth-provider",
+    "keycloak",
+    "--oidc-issuer-url",
+    "https://kc/realms/r",
+]
+
+
+def _web_config_from(argv: list[str], env: dict[str, str]) -> WebConfig:
+    with patch("sys.argv", ["authsome-mcp-proxy", *argv]):
+        with patch.dict(os.environ, env, clear=True):
+            args = cli()
+    config = build_proxy_config(args)
+    assert isinstance(config, WebConfig)
+    return config
+
+
+class TestSeveralUpstreams:
+    """UPSTREAMS / --upstream: one proxy, several upstreams, one identity."""
+
+    def test_reads_routes_from_the_environment(self):
+        config = _web_config_from(
+            _HTTP_ARGS,
+            {
+                "UPSTREAMS": "secure, emb3d,",
+                "UPSTREAM_SECURE_MCP_URL": "http://secure:8080/mcp",
+                "UPSTREAM_EMB3D_MCP_URL": "http://emb3d:8080/mcp",
+                "DEFAULT_UPSTREAM": "secure",
+            },
+        )
+        assert [(r.name, r.mcp_url) for r in config.upstreams] == [
+            ("secure", "http://secure:8080/mcp"),
+            ("emb3d", "http://emb3d:8080/mcp"),
+        ]
+        assert config.default_upstream == "secure"
+
+    def test_route_settings_fall_back_to_the_global_ones(self):
+        """Each UPSTREAM_<NAME>_* variable is optional and defaults to its
+        global counterpart, which defaults as in single-upstream mode."""
+        config = _web_config_from(
+            _HTTP_ARGS,
+            {
+                "UPSTREAMS": "secure,emb3d,repo",
+                "UPSTREAM_SECURE_MCP_URL": "http://secure/mcp",
+                "UPSTREAM_EMB3D_MCP_URL": "http://emb3d/mcp",
+                "UPSTREAM_REPO_MCP_URL": "http://repo/mcp",
+                "OUTBOUND_AUTH": "static",
+                "OUTBOUND_HEADER_NAME": "X-API-Key",
+                "OUTBOUND_HEADER_VALUE": "global-key",
+                "UPSTREAM_SECURE_OUTBOUND_AUTH": "forward",
+                "UPSTREAM_EMB3D_OUTBOUND_AUTH": "none",
+                "UPSTREAM_REPO_OUTBOUND_HEADER_VALUE": "repo-key",
+                "MCP_PROXY_NAME": "itemis",
+                "MCP_PROXY_VERSION": "1.0.0",
+                "UPSTREAM_EMB3D_PROXY_NAME": "EMB3D",
+                "UPSTREAM_EMB3D_PROXY_INSTRUCTIONS": "Look up threats here.",
+                "UPSTREAM_EMB3D_PROXY_WEBSITE_URL": "https://emb3d.example.com",
+                "UPSTREAM_EMB3D_PROXY_VERSION": "2.0.0",
+            },
+        )
+        secure, emb3d, repo = config.upstreams
+
+        assert secure.outbound_auth == "forward"
+        assert emb3d.outbound_auth == "none"
+        assert repo.outbound_auth == "static"
+        assert repo.outbound_header_name == "X-API-Key"
+        assert repo.outbound_header_value == "repo-key"
+        assert secure.outbound_header_value == "global-key"
+
+        assert (secure.proxy_name, secure.proxy_version) == ("itemis", "1.0.0")
+        assert (emb3d.proxy_name, emb3d.proxy_version) == ("EMB3D", "2.0.0")
+        assert emb3d.proxy_instructions == "Look up threats here."
+        assert emb3d.proxy_website_url == "https://emb3d.example.com"
+        assert secure.proxy_instructions is None
+
+    def test_route_defaults_without_any_global_setting(self):
+        config = _web_config_from(
+            _HTTP_ARGS,
+            {"UPSTREAMS": "secure", "UPSTREAM_SECURE_MCP_URL": "http://secure/mcp"},
+        )
+        (route,) = config.upstreams
+        assert route.outbound_auth == "forward"
+        assert route.outbound_header_name == "Authorization"
+
+    def test_client_credentials_settings_are_per_route_too(self):
+        config = _web_config_from(
+            _HTTP_ARGS,
+            {
+                "UPSTREAMS": "svc",
+                "UPSTREAM_SVC_MCP_URL": "http://svc/mcp",
+                "UPSTREAM_SVC_OUTBOUND_AUTH": "oauth-client-credentials",
+                "UPSTREAM_SVC_OUTBOUND_CLIENT_ID": "svc-id",
+                "UPSTREAM_SVC_OUTBOUND_CLIENT_SECRET": "svc-secret",
+                "OUTBOUND_TOKEN_URL": "https://idp/token",
+            },
+        )
+        (route,) = config.upstreams
+        assert route.outbound_client_id == "svc-id"
+        assert route.outbound_client_secret == "svc-secret"
+        assert route.outbound_token_url == "https://idp/token"
+
+    def test_dashes_in_names_become_underscores_in_variables(self):
+        config = _web_config_from(
+            _HTTP_ARGS,
+            {
+                "UPSTREAMS": "knowledge-base",
+                "UPSTREAM_KNOWLEDGE_BASE_MCP_URL": "http://kb/mcp",
+                "UPSTREAM_KNOWLEDGE_BASE_OUTBOUND_AUTH": "none",
+            },
+        )
+        (route,) = config.upstreams
+        assert route.path == "/knowledge-base/mcp"
+        assert route.outbound_auth == "none"
+
+    def test_reads_routes_from_repeated_flags(self):
+        config = _web_config_from(
+            [
+                *_HTTP_ARGS,
+                "--upstream",
+                "secure=http://secure/mcp",
+                "--upstream",
+                "emb3d=http://emb3d/mcp?x=1",
+                "--default-upstream",
+                "emb3d",
+            ],
+            {"UPSTREAM_EMB3D_OUTBOUND_AUTH": "none"},
+        )
+        assert [(r.name, r.mcp_url) for r in config.upstreams] == [
+            ("secure", "http://secure/mcp"),
+            # Only the first '=' separates; the URL may contain more.
+            ("emb3d", "http://emb3d/mcp?x=1"),
+        ]
+        assert config.upstreams[1].outbound_auth == "none"
+        assert config.default_upstream == "emb3d"
+
+    def test_flags_win_over_the_environment(self):
+        config = _web_config_from(
+            [*_HTTP_ARGS, "--upstream", "secure=http://from-flag/mcp"],
+            {
+                "UPSTREAMS": "emb3d",
+                "UPSTREAM_EMB3D_MCP_URL": "http://emb3d/mcp",
+                "UPSTREAM_SECURE_MCP_URL": "http://from-env/mcp",
+            },
+        )
+        assert [(r.name, r.mcp_url) for r in config.upstreams] == [
+            ("secure", "http://from-flag/mcp")
+        ]
+
+    @pytest.mark.parametrize("raw", ["secure", "=http://u/mcp", "secure="])
+    def test_malformed_flag_is_a_usage_error(self, raw):
+        with patch("sys.argv", ["authsome-mcp-proxy", *_HTTP_ARGS, "--upstream", raw]):
+            with patch.dict(os.environ, {}, clear=True):
+                with pytest.raises(SystemExit):
+                    cli()
+
+    def test_missing_route_url_names_the_variable(self):
+        with pytest.raises(ValueError, match="UPSTREAM_EMB3D_MCP_URL is required"):
+            _web_config_from(
+                _HTTP_ARGS,
+                {
+                    "UPSTREAMS": "secure,emb3d",
+                    "UPSTREAM_SECURE_MCP_URL": "http://s/mcp",
+                },
+            )
+
+    def test_invalid_route_name_is_rejected(self):
+        with pytest.raises(ValueError, match="'Secure' must match"):
+            _web_config_from(
+                _HTTP_ARGS,
+                {"UPSTREAMS": "Secure", "UPSTREAM_SECURE_MCP_URL": "http://s/mcp"},
+            )
+
+    @pytest.mark.parametrize(
+        "argv,env",
+        [
+            pytest.param(
+                ["http://single/mcp"],
+                {"UPSTREAMS": "secure", "UPSTREAM_SECURE_MCP_URL": "http://s/mcp"},
+                id="positional",
+            ),
+            pytest.param(
+                [],
+                {
+                    "UPSTREAM_MCP_URL": "http://single/mcp",
+                    "UPSTREAMS": "secure",
+                    "UPSTREAM_SECURE_MCP_URL": "http://s/mcp",
+                },
+                id="env",
+            ),
+            pytest.param(
+                ["--upstream", "secure=http://s/mcp"],
+                {"UPSTREAM_MCP_URL": "http://single/mcp"},
+                id="flag",
+            ),
+        ],
+    )
+    def test_cannot_be_combined_with_a_single_upstream_url(self, argv, env):
+        """Which of the two the operator meant is not guessable -- and silently
+        preferring one would leave the other's clients pointed at nothing."""
+        with pytest.raises(ValueError, match="UPSTREAMS.*UPSTREAM_MCP_URL"):
+            _web_config_from([*argv, *_HTTP_ARGS], env)
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {"UPSTREAMS": "secure", "UPSTREAM_SECURE_MCP_URL": "http://s/mcp"},
+            {"DEFAULT_UPSTREAM": "secure"},
+        ],
+    )
+    def test_stdio_mode_rejects_several_upstreams(self, env):
+        with patch("sys.argv", ["authsome-mcp-proxy"]):
+            with patch.dict(os.environ, env, clear=True):
+                args = cli()
+        with pytest.raises(ValueError, match="require --transport http"):
+            build_proxy_config(args)
+
+    def test_single_upstream_mode_is_unchanged(self):
+        config = _web_config_from(["http://single/mcp", *_HTTP_ARGS], {})
+        assert config.upstreams == []
+        assert config.default_upstream is None

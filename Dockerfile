@@ -7,6 +7,12 @@
 # Operators can override any of those via container env vars (k8s deployment
 # manifest, `docker run -e ...`, etc.).
 #
+# One container can also front several upstreams behind one sign-in: set
+# UPSTREAMS plus UPSTREAM_<NAME>_MCP_URL per upstream instead of
+# UPSTREAM_MCP_URL. Per-upstream outbound auth and identity
+# (UPSTREAM_<NAME>_OUTBOUND_*, UPSTREAM_<NAME>_PROXY_*) are settable only via
+# env vars -- see "Serving several upstreams from one deployment" in the README.
+#
 # Base image: python:3.13-slim pinned by digest for reproducibility.
 
 # ---------------------------------------------------------------------------

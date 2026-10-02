@@ -25,6 +25,10 @@ proxy only has to forward the switch. It is inert for ``keycloak`` -- there
 Keycloak is the authorization server, so whether a downstream client may
 identify itself by URL is Keycloak's decision, not this proxy's.
 
+When one hostname fronts several upstreams, one provider instance serves all of
+their routes; :func:`share_authorization_server` adapts it after the apps are
+built (see :mod:`authsome_mcp_proxy.path_router` for why).
+
 To add a new IdP:
 
 1. Add a literal to ``AuthProvider`` in :mod:`authsome_mcp_proxy.config`.
@@ -36,18 +40,29 @@ To add a new IdP:
 
 from __future__ import annotations
 
+import logging
 from importlib.metadata import version
 from typing import TYPE_CHECKING
 
 from fastmcp.server.auth.auth import AuthProvider as FastMCPAuthProvider
+from fastmcp.server.auth.identity_assertion import normalize_resource_url
+from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.aws import AWSCognitoProvider
 from fastmcp.server.auth.providers.azure import AzureProvider
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.keycloak import KeycloakAuthProvider
+from mcp.server.auth.provider import AuthorizeError
 
 if TYPE_CHECKING:
+    from collections.abc import Collection
+
+    from mcp.server.auth.provider import AuthorizationParams
+    from mcp.shared.auth import OAuthClientInformationFull
+
     from .config import WebConfig
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_scopes(scopes: str | None) -> list[str] | None:
@@ -189,3 +204,88 @@ def build_inbound_auth(
         f"Unknown inbound_auth_provider {config.inbound_auth_provider!r}; supported: "
         "oidc, keycloak, aws-cognito, google, azure"
     )
+
+
+def share_authorization_server(
+    provider: FastMCPAuthProvider, resource_urls: Collection[str]
+) -> None:
+    """Let one provider be the authorization server of several routes.
+
+    Call it after every route's app has been built over ``provider``. Each
+    ``create_streamable_http_app`` call re-binds an ``OAuthProxy`` to the route
+    it was built for, so on its own the last route would be the only
+    ``resource`` that ``/authorize`` accepts and the audience of every token --
+    see :mod:`authsome_mcp_proxy.path_router`. Afterwards:
+
+    - Tokens are bound to the provider's base URL, the identity every route
+      shares, so one sign-in is accepted on all of them.
+    - ``/authorize`` accepts any of ``resource_urls`` as RFC 8707 ``resource``
+      and still refuses every other one with ``invalid_target``, as FastMCP
+      would. The client's value is passed on unchanged, so the IdP sees the
+      same ``resource`` it would in a single-route deployment. Keeping the
+      provider's resource at the base URL and rewriting an accepted
+      ``resource`` to it instead would leave FastMCP's check in place, but the
+      IdP would then see a different ``resource`` than the client sent.
+
+    Providers that are not an ``OAuthProxy`` are left alone. For ``keycloak``
+    the IdP is the authorization server and nothing on the proxy is bound to
+    one route; a plain ``OAuthProvider`` binds nothing either.
+
+    Args:
+        provider: The provider shared by the routes' apps.
+        resource_urls: The full URL of every route, e.g.
+            ``https://mcp.example.com/secure/mcp``.
+
+    Raises:
+        RuntimeError: If the provider has identity assertion (SEP-990)
+            configured, whose resource check this would switch off too, or if
+            FastMCP no longer binds the token audience the way this relies on.
+    """
+    if not isinstance(provider, OAuthProxy):
+        return
+    if getattr(provider, "_identity_assertion", None) is not None:
+        # The jwt-bearer grant checks its RFC 8707 resource against the same
+        # single URL that is cleared below, and would stop checking it at all.
+        raise RuntimeError(
+            "identity assertion cannot be shared across routes yet: its resource "
+            "check would be disabled along with the one at /authorize"
+        )
+
+    # set_mcp_path is the public hook FastMCP itself rebinds through; without a
+    # path, the resource -- and with it the minted tokens' audience -- is the
+    # base URL.
+    provider.set_mcp_path(None)
+    if provider.jwt_issuer.audience != str(provider.base_url):
+        raise RuntimeError(
+            f"Cannot share {type(provider).__name__} across routes: with fastmcp "
+            f"{version('fastmcp')} its tokens are bound to "
+            f"{provider.jwt_issuer.audience!r} rather than the base URL "
+            f"{str(provider.base_url)!r}."
+        )
+    # FastMCP checks a requested resource against this single URL and skips the
+    # check when there is none. The check below replaces it.
+    provider._resource_url = None
+
+    accepted = frozenset(normalize_resource_url(url) for url in resource_urls)
+    authorize_one = provider.authorize
+
+    async def authorize(
+        client: OAuthClientInformationFull, params: AuthorizationParams
+    ) -> str:
+        # Same normalization as FastMCP's own check: a route URL carries no
+        # query, so a client-added one (ChatGPT sends ?kb_name=...) is ignored.
+        requested = params.resource
+        if requested and normalize_resource_url(requested) not in accepted:
+            logger.warning(
+                "Resource mismatch: client requested %s, this identity serves %s",
+                requested,
+                ", ".join(sorted(accepted)),
+            )
+            raise AuthorizeError(
+                error="invalid_target",
+                error_description="Resource does not match this server",
+            )
+        return await authorize_one(client, params)
+
+    # An instance attribute, so it shadows the method for this provider only.
+    provider.authorize = authorize  # ty: ignore[invalid-assignment]

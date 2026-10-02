@@ -1,12 +1,13 @@
 from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from starlette.middleware import Middleware
 
 from authsome_mcp_proxy import mcp_proxy
-from authsome_mcp_proxy.config import DesktopConfig, WebConfig
+from authsome_mcp_proxy.config import DesktopConfig, UpstreamRoute, WebConfig
 from authsome_mcp_proxy.upstream_identity import UpstreamIdentityMiddleware
 
 # ---------------------------------------------------------------------------
@@ -508,6 +509,261 @@ async def test_serve_http_passes_host_and_port_to_uvicorn():
     assert config_kwargs["port"] == 8000
     assert mocks.uvicorn.Config.call_args.args[0] is mocks.host_router.return_value
     mocks.uvicorn.Server.return_value.serve.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
+# Several upstreams
+# ---------------------------------------------------------------------------
+
+
+def _multi_config(**overrides) -> WebConfig:
+    kwargs: dict[str, Any] = {
+        "inbound_auth_provider": "keycloak",
+        "proxy_base_url": "https://mcp.example.com",
+        "issuer_url": "https://kc.example.com/realms/r",
+        "upstreams": [
+            UpstreamRoute(name="secure", mcp_url="http://secure/mcp"),
+            UpstreamRoute(
+                name="emb3d",
+                mcp_url="http://emb3d/mcp",
+                outbound_auth="none",
+                proxy_name="EMB3D",
+                proxy_instructions="Look up threats here.",
+            ),
+        ],
+        "default_upstream": "secure",
+    }
+    kwargs.update(overrides)
+    return WebConfig(**kwargs)
+
+
+@pytest.mark.asyncio
+async def test_run_async_web_builds_one_proxy_per_upstream():
+    """Each route gets its own upstream client, outbound auth and identity --
+    nothing of one route's backend is shared with another's."""
+    config = _multi_config()
+    secure_auth, emb3d_auth = MagicMock(name="secure_auth"), MagicMock(name="emb3d")
+    secure_server, emb3d_server = MagicMock(name="secure"), MagicMock(name="emb3d")
+
+    with (
+        patch(
+            "authsome_mcp_proxy.mcp_proxy.build_outbound_auth",
+            side_effect=[secure_auth, emb3d_auth],
+        ) as mock_build_outbound,
+        patch("authsome_mcp_proxy.mcp_proxy.Client") as mock_client_cls,
+        patch(
+            "authsome_mcp_proxy.mcp_proxy.create_proxy",
+            side_effect=[secure_server, emb3d_server],
+        ) as mock_create_proxy,
+        patch(
+            "authsome_mcp_proxy.mcp_proxy._serve_http", new_callable=AsyncMock
+        ) as mock_serve,
+    ):
+        await mcp_proxy.run_async(None, config, show_banner=False)
+
+    assert [c.args[0] for c in mock_build_outbound.call_args_list] == config.upstreams
+    assert [
+        (c.kwargs["transport"], c.kwargs["auth"])
+        for c in mock_client_cls.call_args_list
+    ] == [("http://secure/mcp", secure_auth), ("http://emb3d/mcp", emb3d_auth)]
+    assert [c.kwargs for c in mock_create_proxy.call_args_list] == [
+        {},
+        {"name": "EMB3D", "instructions": "Look up threats here."},
+    ]
+    for server in (secure_server, emb3d_server):
+        server.add_middleware.assert_called_once()
+    mock_serve.assert_called_once_with(
+        {"secure": secure_server, "emb3d": emb3d_server}, config, False
+    )
+
+
+@pytest.mark.asyncio
+async def test_run_async_rejects_a_single_url_alongside_upstreams():
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await mcp_proxy.run_async("http://single/mcp", _multi_config(), False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", [None, ""])
+async def test_run_async_requires_an_upstream(url):
+    with pytest.raises(ValueError, match="upstream_url is required"):
+        await mcp_proxy.run_async(url, _web_config(), False)
+
+
+@contextmanager
+def _multi_serve_patches():
+    """_serve_patches plus the two multi-upstream collaborators."""
+    with (
+        _serve_patches() as mocks,
+        patch("authsome_mcp_proxy.mcp_proxy.PathRouter") as path_router,
+        patch("authsome_mcp_proxy.mcp_proxy.share_authorization_server") as share,
+    ):
+        mocks.path_router = path_router
+        mocks.share = share
+        yield mocks
+
+
+def _route_servers():
+    return {"secure": _fake_server(), "emb3d": _fake_server()}
+
+
+@pytest.mark.asyncio
+async def test_serve_http_shares_one_provider_across_an_identitys_routes():
+    """One authorization server per identity: every route's app is built over
+    the same provider, which is then widened to all of their resources."""
+    servers = _route_servers()
+
+    with _multi_serve_patches() as mocks:
+        await mcp_proxy._serve_http(servers, _multi_config(), show_banner=False)
+
+    mocks.build_inbound.assert_called_once()
+    provider = mocks.build_inbound.return_value
+    calls = mocks.create_app.call_args_list
+    assert [c.kwargs["streamable_http_path"] for c in calls] == [
+        "/mcp",
+        "/secure/mcp",
+        "/emb3d/mcp",
+    ]
+    assert [c.kwargs["server"] for c in calls] == [
+        servers["secure"],
+        servers["secure"],
+        servers["emb3d"],
+    ]
+    assert {id(c.kwargs["auth"]) for c in calls} == {id(provider)}
+
+    mocks.share.assert_called_once_with(
+        provider,
+        [
+            "https://mcp.example.com/mcp",
+            "https://mcp.example.com/secure/mcp",
+            "https://mcp.example.com/emb3d/mcp",
+        ],
+    )
+    router_args = mocks.path_router.call_args
+    assert list(router_args.args[0]) == ["/mcp", "/secure/mcp", "/emb3d/mcp"]
+    assert router_args.kwargs["fallback"] == "/mcp"
+    assert mocks.host_router.call_args.args[0] == {
+        "https://mcp.example.com": mocks.path_router.return_value
+    }
+
+
+@pytest.mark.asyncio
+async def test_serve_http_without_default_upstream_serves_routes_only():
+    """No /mcp alias; the first upstream's route answers everything else."""
+    with _multi_serve_patches() as mocks:
+        await mcp_proxy._serve_http(
+            _route_servers(), _multi_config(default_upstream=None), show_banner=False
+        )
+
+    assert [
+        c.kwargs["streamable_http_path"] for c in mocks.create_app.call_args_list
+    ] == ["/secure/mcp", "/emb3d/mcp"]
+    assert mocks.path_router.call_args.kwargs["fallback"] == "/secure/mcp"
+
+
+@pytest.mark.asyncio
+async def test_serve_http_builds_one_identity_per_hostname_over_all_routes():
+    config = _multi_config(additional_proxy_base_urls=["https://mcp.example.io"])
+    auth_com, auth_io = MagicMock(name="auth_com"), MagicMock(name="auth_io")
+
+    with _multi_serve_patches() as mocks:
+        mocks.build_inbound.side_effect = [auth_com, auth_io]
+        await mcp_proxy._serve_http(_route_servers(), config, show_banner=False)
+
+    auths = [c.kwargs["auth"] for c in mocks.create_app.call_args_list]
+    assert auths == [auth_com] * 3 + [auth_io] * 3
+    assert [c.args for c in mocks.share.call_args_list] == [
+        (
+            auth_com,
+            [
+                f"https://mcp.example.com{p}"
+                for p in ("/mcp", "/secure/mcp", "/emb3d/mcp")
+            ],
+        ),
+        (
+            auth_io,
+            [
+                f"https://mcp.example.io{p}"
+                for p in ("/mcp", "/secure/mcp", "/emb3d/mcp")
+            ],
+        ),
+    ]
+    assert list(mocks.host_router.call_args.args[0]) == [
+        "https://mcp.example.com",
+        "https://mcp.example.io",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_serve_http_path_moves_the_default_upstreams_alias():
+    with _multi_serve_patches() as mocks:
+        await mcp_proxy._serve_http(
+            _route_servers(), _multi_config(), False, path="/legacy"
+        )
+
+    assert mocks.create_app.call_args_list[0].kwargs["streamable_http_path"] == (
+        "/legacy"
+    )
+
+
+@pytest.mark.asyncio
+async def test_serve_http_rejects_an_alias_colliding_with_a_route():
+    with _multi_serve_patches():
+        with pytest.raises(ValueError, match="already the route"):
+            await mcp_proxy._serve_http(
+                _route_servers(), _multi_config(), False, path="/emb3d/mcp"
+            )
+
+
+@pytest.mark.asyncio
+async def test_serve_http_enters_every_route_servers_lifespan_once():
+    """The default upstream backs two routes but is still one server."""
+    servers = _route_servers()
+
+    with _multi_serve_patches():
+        await mcp_proxy._serve_http(servers, _multi_config(), show_banner=False)
+
+    for server in servers.values():
+        server._lifespan_manager.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("several", [False, True])
+async def test_serve_http_shows_the_banner_only_for_one_server(several):
+    """The banner names a single server; with several it would name one of
+    them as if it were the whole proxy."""
+    single_config = _multi_config(
+        upstreams=[UpstreamRoute(name="secure", mcp_url="http://secure/mcp")]
+    )
+    servers = _route_servers() if several else {"secure": _fake_server()}
+    config = _multi_config() if several else single_config
+
+    with (
+        _multi_serve_patches(),
+        patch("fastmcp.utilities.cli.log_server_banner") as banner,
+    ):
+        await mcp_proxy._serve_http(servers, config, show_banner=True)
+
+    assert banner.called is not several
+
+
+@pytest.mark.asyncio
+async def test_serve_http_with_one_route_needs_no_path_router():
+    """One upstream without the /mcp alias is a single route, served as before."""
+    config = _multi_config(
+        upstreams=[UpstreamRoute(name="secure", mcp_url="http://secure/mcp")],
+        default_upstream=None,
+    )
+    with _multi_serve_patches() as mocks:
+        await mcp_proxy._serve_http(
+            {"secure": _fake_server()}, config, show_banner=False
+        )
+
+    mocks.path_router.assert_not_called()
+    mocks.share.assert_not_called()
+    assert mocks.host_router.call_args.args[0] == {
+        "https://mcp.example.com": mocks.create_app.return_value
+    }
 
 
 # ---------------------------------------------------------------------------
