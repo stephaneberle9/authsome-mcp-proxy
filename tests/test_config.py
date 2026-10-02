@@ -193,6 +193,10 @@ class TestWebConfigOutbound:
         )
         assert config.outbound_auth == "oauth-client-credentials"
 
+    def test_none_needs_no_further_fields(self):
+        config = WebConfig(**self._base_keycloak_kwargs(), outbound_auth="none")
+        assert config.outbound_auth == "none"
+
     def test_static_requires_header_value(self):
         with pytest.raises(ValueError, match="static.*outbound_header_value"):
             WebConfig(**self._base_keycloak_kwargs(), outbound_auth="static")

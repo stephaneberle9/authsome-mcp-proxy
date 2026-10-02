@@ -20,6 +20,7 @@ import pytest
 from authsome_mcp_proxy.config import WebConfig
 from authsome_mcp_proxy.outbound_auth import (
     ForwardSessionTokenAuth,
+    NoCredentialAuth,
     OAuthClientCredentialsAuth,
     StaticHeaderAuth,
     build_outbound_auth,
@@ -78,6 +79,10 @@ class TestBuildOutboundAuthDispatch:
         assert auth.token_url == "https://idp.example.com/token"
         assert auth.client_id == "ocid"
         assert auth.client_secret == "osec"
+
+    def test_none_returns_no_credential_auth(self):
+        config = WebConfig(**_base_keycloak_kwargs(), outbound_auth="none")
+        assert isinstance(build_outbound_auth(config), NoCredentialAuth)
 
     def test_unknown_outbound_auth_raises(self):
         config = WebConfig(**_base_keycloak_kwargs())
@@ -314,6 +319,106 @@ class TestOAuthClientCredentialsAuth:
             mock_client.post.call_args.kwargs["data"]["scope"]
             == "upstream:read upstream:write"
         )
+
+
+class TestNoCredentialAuth:
+    """none: the upstream receives no credential, not even a forwarded one."""
+
+    def test_strips_a_forwarded_authorization_header(self):
+        """FastMCP's proxy copies the downstream Authorization header onto the
+        upstream connection; adding nothing would let it through."""
+        request = httpx2.Request(
+            "POST",
+            "https://kb.example.com/mcp",
+            headers={"Authorization": "Bearer user-token", "X-Request-Id": "r1"},
+        )
+        sent = next(NoCredentialAuth().auth_flow(request))
+
+        assert "authorization" not in sent.headers
+        assert sent.headers["x-request-id"] == "r1"
+
+    def test_leaves_a_request_without_credential_alone(self):
+        request = httpx2.Request("GET", "https://kb.example.com/mcp")
+        assert (
+            "authorization" not in next(NoCredentialAuth().auth_flow(request)).headers
+        )
+
+
+class TestNoCredentialThroughTheProxy:
+    """What ``none`` is for, end to end through FastMCP's proxy."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "outbound_auth,expected",
+        [
+            # The control: FastMCP's proxy forwards the client's token on its own.
+            pytest.param(None, {"authorization": "Bearer user-token"}, id="no-auth"),
+            pytest.param(NoCredentialAuth(), {}, id="none"),
+        ],
+    )
+    async def test_the_users_token_does_not_reach_the_upstream(
+        self, outbound_auth, expected
+    ):
+        from contextlib import AsyncExitStack
+
+        from fastmcp import Client, FastMCP
+        from fastmcp.client.transports import StreamableHttpTransport
+        from fastmcp.server import create_proxy
+        from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+        from fastmcp.server.dependencies import get_http_headers
+        from fastmcp.server.http import create_streamable_http_app
+
+        upstream = FastMCP(name="upstream")
+
+        @upstream.tool()
+        def seen_headers() -> dict[str, str]:
+            headers = get_http_headers(include_all=True)
+            return {
+                h: headers[h] for h in ("authorization", "x-request-id") if h in headers
+            }
+
+        def transport_to(app, headers=None):
+            def client_factory(headers=None, timeout=None, auth=None, **kwargs):
+                if timeout is not None:
+                    kwargs["timeout"] = timeout
+                return httpx2.AsyncClient(
+                    transport=httpx2.ASGITransport(app=app),
+                    headers=headers,
+                    auth=auth,
+                    **kwargs,
+                )
+
+            return StreamableHttpTransport(
+                "http://testserver/mcp",
+                headers=headers,
+                httpx_client_factory=client_factory,
+            )
+
+        upstream_app = create_streamable_http_app(
+            server=upstream, streamable_http_path="/mcp"
+        )
+        proxy = create_proxy(Client(transport_to(upstream_app), auth=outbound_auth))
+        proxy_app = create_streamable_http_app(
+            server=proxy,
+            streamable_http_path="/mcp",
+            auth=StaticTokenVerifier(
+                tokens={"user-token": {"client_id": "user", "scopes": []}}
+            ),
+        )
+
+        async with AsyncExitStack() as stack:
+            for app in (upstream_app, proxy_app):
+                await stack.enter_async_context(app.router.lifespan_context(app))
+            client = await stack.enter_async_context(
+                Client(
+                    transport_to(proxy_app, headers={"X-Request-Id": "r1"}),
+                    auth="user-token",
+                )
+            )
+            seen = (await client.call_tool("seen_headers", {})).data
+
+        # Every other header the client sent still arrives.
+        assert seen == {"x-request-id": "r1", **expected}
 
 
 class TestAcceptedByFastMCPClient:

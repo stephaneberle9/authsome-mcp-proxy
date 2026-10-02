@@ -727,7 +727,7 @@ extra fields):
 
 | Env var | CLI flag | Description |
 |---|---|---|
-| `OUTBOUND_AUTH` | `--outbound-auth {forward,oauth-client-credentials,static}` | Outbound mechanism. |
+| `OUTBOUND_AUTH` | `--outbound-auth {forward,none,oauth-client-credentials,static}` | Outbound mechanism. `none` sends the upstream no credential: the user's token is removed from the headers the proxy forwards. Other headers the client sends, such as `X-Api-Key`, still pass through in every mode, as before. |
 | `OUTBOUND_TOKEN_URL` | `--outbound-token-url` | Token endpoint for `oauth-client-credentials`. |
 | `OUTBOUND_CLIENT_ID` | `--outbound-client-id` | Client ID for `oauth-client-credentials`. |
 | `OUTBOUND_CLIENT_SECRET` | `--outbound-client-secret` | Client secret for `oauth-client-credentials`. |

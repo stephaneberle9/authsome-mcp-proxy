@@ -25,7 +25,7 @@ mechanism is used).
 """
 
 from dataclasses import dataclass, field
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, get_args
 
 AuthProvider: TypeAlias = Literal["oidc", "keycloak", "aws-cognito", "google", "azure"]
 """Inbound auth provider type for web mode.
@@ -46,10 +46,15 @@ Two distinct patterns are dispatched:
   IdP.
 """
 
-OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "static"]
+OutboundAuthMode: TypeAlias = Literal[
+    "forward", "none", "oauth-client-credentials", "static"
+]
 """Outbound auth mechanism the proxy uses when calling the upstream MCP.
 
 - ``forward`` -- reuse the downstream session's bearer token (Pattern C).
+- ``none`` -- send no credential at all, for an upstream that validates none,
+  such as a read-only knowledge server. The user's token is withheld rather
+  than handed to a server that has no use for it.
 - ``oauth-client-credentials`` -- proxy obtains its own token via OAuth
   client-credentials grant against an outbound token endpoint independent
   of the inbound IdP.
@@ -57,6 +62,8 @@ OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "st
   keys, API tokens, and personal access tokens (PATs) uniformly -- same wire
   shape under different upstream vocabularies.
 """
+
+OUTBOUND_AUTH_MODES: tuple[OutboundAuthMode, ...] = get_args(OutboundAuthMode)
 
 
 @dataclass

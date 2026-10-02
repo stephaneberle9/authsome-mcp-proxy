@@ -27,13 +27,12 @@ from exceptiongroup import BaseExceptionGroup
 from mcp.shared.exceptions import MCPError
 
 from . import __version__, mcp_proxy
-from .config import DesktopConfig, ProxyConfig, WebConfig
+from .config import OUTBOUND_AUTH_MODES, DesktopConfig, ProxyConfig, WebConfig
 
 logger = logging.getLogger(__name__)
 
 
 _INBOUND_AUTH_PROVIDERS = ("oidc", "keycloak", "aws-cognito", "google", "azure")
-_OUTBOUND_AUTH_MODES = ("forward", "oauth-client-credentials", "static")
 
 _TRUTHY = ("1", "true", "yes", "on")
 _FALSY = ("0", "false", "no", "off")
@@ -226,11 +225,13 @@ def cli() -> argparse.Namespace:
     # Web-mode-only outbound options
     parser.add_argument(
         "--outbound-auth",
-        choices=list(_OUTBOUND_AUTH_MODES),
+        choices=list(OUTBOUND_AUTH_MODES),
         default=None,
         help="How the proxy authenticates outbound calls to the upstream MCP "
         "server. 'forward' (default): reuse the downstream session's bearer "
-        "token (Pattern C). 'oauth-client-credentials': proxy obtains its own "
+        "token (Pattern C). 'none': send no credential, not even the user's "
+        "token, to an upstream that validates none. "
+        "'oauth-client-credentials': proxy obtains its own "
         "token via OAuth client_credentials grant against an outbound IdP "
         "independent of the inbound IdP (Pattern B with a tenant- or user-"
         "scoped OAuth credential). 'static': proxy injects a fixed header "

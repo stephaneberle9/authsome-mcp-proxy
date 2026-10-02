@@ -622,6 +622,26 @@ class TestBuildProxyConfig:
         assert config.outbound_auth == "oauth-client-credentials"
         assert config.outbound_token_url == "https://idp/token"
 
+    def test_http_builds_web_config_with_none_outbound(self):
+        args = _parse(
+            [
+                "http://upstream",
+                "--transport",
+                "http",
+                "--proxy-base-url",
+                "https://mcp.example.com",
+                "--inbound-auth-provider",
+                "keycloak",
+                "--oidc-issuer-url",
+                "https://kc/realms/r",
+                "--outbound-auth",
+                "none",
+            ]
+        )
+        config = build_proxy_config(args)
+        assert isinstance(config, WebConfig)
+        assert config.outbound_auth == "none"
+
     def test_http_builds_web_config_with_static_outbound(self):
         args = _parse(
             [
