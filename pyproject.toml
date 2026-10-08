@@ -53,6 +53,21 @@ dependencies = [
     "httpx2>=2.5.0",
     "mcp>=2.0.0",
     "pydantic>=2.12.0",
+    # Transitive-but-imported as well: the encryption wrapper around an external
+    # store backend is keyed with a cryptography Fernet. The floor is the one
+    # py-key-value-aio's own encryption wrappers require, so it narrows nothing.
+    "cryptography>=45.0.0",
+]
+
+[project.optional-dependencies]
+# Store backends for the OAuth proxy state (STORE_BACKEND). Each is an extra so
+# the default file store pulls in no cloud SDK; the backend's store class is
+# imported only when it is selected. The floor matches what fastmcp already
+# enforces (py-key-value-aio>=0.4.4,<0.5), where DynamoDBStore takes the
+# auto_create switch the proxy relies on to leave table creation to
+# infrastructure.
+dynamodb = [
+    "py-key-value-aio[dynamodb]>=0.4.4",
 ]
 
 [dependency-groups]
@@ -71,6 +86,19 @@ test = [
     "pytest-timeout>=2.0.0",
     "inline-snapshot>=0.6.0",
     "packaging>=22",
+    # The DynamoDB store backend is tested against moto's server mode, bound to
+    # 127.0.0.1 in-process, so the suite needs neither AWS nor Docker. Server
+    # mode rather than moto's in-process patching: the store talks through
+    # aioboto3, whose aiohttp transport the botocore patches do not intercept.
+    # Server mode needs flask and flask-cors, which moto declares only under
+    # its "server" extra; that extra also drags in every other service's
+    # dependencies (cfn-lint, sympy, graphql-core, ...), so the two are named
+    # here instead. The backend extra itself is pulled in through the project
+    # so CI, which installs no extras, still exercises the backend.
+    "authsome-mcp-proxy[dynamodb]",
+    "moto[dynamodb]>=5.1.0",
+    "flask>=3.0",
+    "flask-cors>=4.0",
 ]
 
 [project.scripts]

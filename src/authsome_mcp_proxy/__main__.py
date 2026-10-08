@@ -12,8 +12,9 @@ This module provides the CLI entry point for running the MCP proxy server. It:
 CLI flags fall back to matching environment variables (CLI arguments take
 precedence). For stdio mode the ``OIDC_*`` env vars apply; for http mode
 the inbound provider params (``OIDC_*``, ``COGNITO_*``, ``AZURE_*``,
-``--audience``, ``--proxy-base-url``, ``ENABLE_CIMD``) and the outbound mode
-params (``OUTBOUND_*``) apply.
+``--audience``, ``--proxy-base-url``, ``ENABLE_CIMD``), the OAuth proxy state
+params (``JWT_SIGNING_KEY``, ``STORE_*``) and the outbound mode params
+(``OUTBOUND_*``) apply.
 """
 
 import argparse
@@ -21,19 +22,21 @@ import asyncio
 import logging
 import os
 import sys
+from typing import cast
 
 import httpx2
 from exceptiongroup import BaseExceptionGroup
 from mcp.shared.exceptions import MCPError
 
 from . import __version__, mcp_proxy
-from .config import DesktopConfig, ProxyConfig, WebConfig
+from .config import DesktopConfig, ProxyConfig, StoreBackend, WebConfig
 
 logger = logging.getLogger(__name__)
 
 
 _INBOUND_AUTH_PROVIDERS = ("oidc", "keycloak", "aws-cognito", "google", "azure")
 _OUTBOUND_AUTH_MODES = ("forward", "oauth-client-credentials", "static")
+_STORE_BACKENDS = ("file", "dynamodb")
 
 _TRUTHY = ("1", "true", "yes", "on")
 _FALSY = ("0", "false", "no", "off")
@@ -223,6 +226,52 @@ def cli() -> argparse.Namespace:
         "is the authorization server. Can also be set via ENABLE_CIMD env var.",
     )
 
+    # Web-mode-only OAuth proxy state options -- inert for keycloak, like
+    # --enable-cimd, since there Keycloak is the authorization server.
+    parser.add_argument(
+        "--jwt-signing-key",
+        default=None,
+        help="Secret the proxy signs the tokens it issues to MCP clients with, "
+        "and from which its store's encryption key is derived. Unset, both are "
+        "derived from the upstream client secret, so rotating that secret signs "
+        "every user out. Required with --store-backend other than 'file'; use a "
+        "long random value. Inert for --inbound-auth-provider keycloak. "
+        "Can also be set via JWT_SIGNING_KEY env var.",
+    )
+    parser.add_argument(
+        "--store-backend",
+        choices=list(_STORE_BACKENDS),
+        default=None,
+        help="Where the proxy keeps client registrations and users' sessions. "
+        "'file' (default): FastMCP's encrypted file store under FASTMCP_HOME, "
+        "lost with a container filesystem. 'dynamodb': an AWS DynamoDB table "
+        "shared by every replica (needs the 'dynamodb' extra). Inert for "
+        "--inbound-auth-provider keycloak. "
+        "Can also be set via STORE_BACKEND env var.",
+    )
+    parser.add_argument(
+        "--store-dynamodb-table",
+        default=None,
+        help="DynamoDB table name -- required for --store-backend dynamodb "
+        "(can also be set via STORE_DYNAMODB_TABLE env var)",
+    )
+    parser.add_argument(
+        "--store-dynamodb-region",
+        default=None,
+        help="AWS region of the DynamoDB table; unset, the AWS SDK's default "
+        "region resolution applies "
+        "(can also be set via STORE_DYNAMODB_REGION env var)",
+    )
+    parser.add_argument(
+        "--store-dynamodb-auto-create",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Create the DynamoDB table at startup when it is missing. Off by "
+        "default: infrastructure is expected to create it, and a missing table "
+        "fails at startup. "
+        "Can also be set via STORE_DYNAMODB_AUTO_CREATE env var.",
+    )
+
     # Web-mode-only outbound options
     parser.add_argument(
         "--outbound-auth",
@@ -341,6 +390,10 @@ def _apply_env_fallbacks(args: argparse.Namespace) -> None:
         ("cognito_aws_region", "COGNITO_AWS_REGION"),
         ("azure_tenant_id", "AZURE_TENANT_ID"),
         ("azure_identifier_uri", "AZURE_IDENTIFIER_URI"),
+        ("jwt_signing_key", "JWT_SIGNING_KEY"),
+        ("store_backend", "STORE_BACKEND"),
+        ("store_dynamodb_table", "STORE_DYNAMODB_TABLE"),
+        ("store_dynamodb_region", "STORE_DYNAMODB_REGION"),
         ("outbound_auth", "OUTBOUND_AUTH"),
         ("outbound_client_id", "OUTBOUND_CLIENT_ID"),
         ("outbound_client_secret", "OUTBOUND_CLIENT_SECRET"),
@@ -367,6 +420,10 @@ def _apply_env_fallbacks(args: argparse.Namespace) -> None:
         # Tri-state on purpose: --no-enable-cimd has to beat ENABLE_CIMD=true,
         # which it cannot if "off" and "unset" both look like False here.
         args.enable_cimd = _env_flag("ENABLE_CIMD", default=True)
+    if args.store_dynamodb_auto_create is None:
+        args.store_dynamodb_auto_create = _env_flag(
+            "STORE_DYNAMODB_AUTO_CREATE", default=False
+        )
 
 
 def _split_base_urls(raw: str) -> list[str]:
@@ -386,6 +443,23 @@ def _split_base_urls(raw: str) -> list[str]:
             "--proxy-base-url (or MCP_PROXY_BASE_URL env var) contains no usable URL"
         )
     return base_urls
+
+
+def _store_backend(raw: str | None) -> StoreBackend:
+    """Resolve ``--store-backend`` / ``STORE_BACKEND``, defaulting to ``file``.
+
+    argparse checks the flag's choices but not the env var's value, and an
+    unknown backend must not fall through to the file store: a typo in
+    ``STORE_BACKEND=dynamodb`` would otherwise quietly leave the deployment as
+    restart-fragile as before.
+    """
+    if not raw:
+        return "file"
+    if raw not in _STORE_BACKENDS:
+        raise ValueError(
+            f"STORE_BACKEND must be one of {', '.join(_STORE_BACKENDS)} -- got {raw!r}"
+        )
+    return cast("StoreBackend", raw)
 
 
 def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
@@ -438,6 +512,11 @@ def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
         cognito_aws_region=args.cognito_aws_region,
         azure_tenant_id=args.azure_tenant_id,
         azure_identifier_uri=args.azure_identifier_uri,
+        jwt_signing_key=args.jwt_signing_key,
+        store_backend=_store_backend(args.store_backend),
+        store_dynamodb_table=args.store_dynamodb_table,
+        store_dynamodb_region=args.store_dynamodb_region,
+        store_dynamodb_auto_create=args.store_dynamodb_auto_create,
         outbound_auth=args.outbound_auth or "forward",
         outbound_client_id=args.outbound_client_id,
         outbound_client_secret=args.outbound_client_secret,

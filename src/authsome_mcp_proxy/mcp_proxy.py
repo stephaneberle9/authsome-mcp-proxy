@@ -37,7 +37,7 @@ from starlette.middleware import Middleware as ASGIMiddleware
 from .config import DesktopConfig, ProxyConfig, WebConfig
 from .external_oidc import ExternalOIDCAuth
 from .host_router import HostRouter
-from .inbound_auth import build_inbound_auth
+from .inbound_auth import build_client_storage, build_inbound_auth
 from .outbound_auth import build_outbound_auth
 from .upstream_identity import UpstreamIdentityMiddleware
 
@@ -232,11 +232,24 @@ async def _serve_http(
         log_level if log_level is not None else fastmcp.settings.log_level
     ).lower()
 
+    # One store for every hostname, built before any provider. The providers of
+    # different hostnames are separate OAuth identities but one proxy: a second
+    # store per hostname would split one deployment's state, and a backend
+    # connection per hostname would multiply its clients for nothing. FastMCP's
+    # default file store is shared the same way -- its directory depends only on
+    # the signing key. Opened here so a backend the proxy cannot reach fails at
+    # startup rather than at the first sign-in.
+    client_storage = build_client_storage(config)
+    if client_storage is not None:
+        await client_storage.open()
+
     apps = {
         base_url: create_streamable_http_app(
             server=mcp_proxy,
             streamable_http_path=mcp_path,
-            auth=build_inbound_auth(config, base_url=base_url),
+            auth=build_inbound_auth(
+                config, base_url=base_url, client_storage=client_storage
+            ),
             json_response=(
                 json_response
                 if json_response is not None
@@ -273,7 +286,11 @@ async def _serve_http(
             server = uvicorn.Server(
                 uvicorn.Config(app, host=host, port=port, **config_kwargs)
             )
-            await server.serve()
+            try:
+                await server.serve()
+            finally:
+                if client_storage is not None:
+                    await client_storage.close()
 
 
 def _server_identity_kwargs(config: WebConfig) -> dict[str, Any]:
