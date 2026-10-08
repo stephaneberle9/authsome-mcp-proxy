@@ -3,12 +3,14 @@
 import logging
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
+from urllib.parse import parse_qs, urlparse
 
 import pytest
 
 from authsome_mcp_proxy.external_oidc import (
     ExternalOIDCAuth,
     OIDCContext,
+    _ExternalOIDCConfiguration,
     _setup_token_refresh_logging,
 )
 
@@ -733,3 +735,172 @@ class TestTokenRefresh:
             # Attempt to refresh should raise RuntimeError
             with pytest.raises(RuntimeError, match="No refresh token available"):
                 await auth._refresh_tokens()
+
+
+ISSUER = "https://auth.example.com/realms/test"
+# The configured issuer URL deliberately differs from the discovery document's
+# `issuer` by a trailing slash, so the tests also pin which of the two `iss` is
+# compared against: RFC 9207 prescribes the authorization server's own issuer
+# identifier, i.e. the discovery value.
+CONFIGURED_ISSUER_URL = f"{ISSUER}/"
+ATTACKER_ISSUER = "https://attacker.example.com"
+
+
+class TestIssValidation:
+    """Test RFC 9207 `iss` validation on the authorization callback.
+
+    `iss` defends against mix-up attacks: a callback carrying another
+    authorization server's code must be rejected before that code is redeemed
+    at this provider's token endpoint.
+    """
+
+    @staticmethod
+    def _make_auth(tmp_path: Path, iss_supported: bool | None) -> ExternalOIDCAuth:
+        oidc_config = _ExternalOIDCConfiguration(
+            strict=False,
+            issuer=ISSUER,
+            authorization_endpoint=f"{ISSUER}/authorize",
+            token_endpoint=f"{ISSUER}/token",
+            authorization_response_iss_parameter_supported=iss_supported,
+        )
+        with (
+            patch("authsome_mcp_proxy.external_oidc._setup_token_refresh_logging"),
+            patch(
+                "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration",
+                return_value=oidc_config,
+            ),
+        ):
+            auth = ExternalOIDCAuth(
+                issuer_url=CONFIGURED_ISSUER_URL,
+                client_id="test-client",
+                token_storage_cache_dir=tmp_path / "cache",
+            )
+        auth.context.storage = AsyncMock()
+        return auth
+
+    @staticmethod
+    async def _run_flow(
+        auth: ExternalOIDCAuth, returned_iss: str | None
+    ) -> tuple[RuntimeError | None, Mock]:
+        """Run the auth flow with a callback carrying `returned_iss`.
+
+        Returns the flow's RuntimeError (None on success) and the token
+        endpoint mock, so callers can assert whether the authorization code
+        was redeemed.
+        """
+        opened_urls: list[str] = []
+
+        async def callback() -> tuple[str, str, str | None]:
+            # Echo the flow's own state, so only `iss` decides the outcome
+            state = parse_qs(urlparse(opened_urls[0]).query)["state"][0]
+            return "auth-code", state, returned_iss
+
+        token_response = Mock()
+        token_response.json.return_value = {
+            "access_token": "access-token",
+            "token_type": "Bearer",
+            "expires_in": 3600,
+        }
+        token_response.raise_for_status = Mock()
+
+        with (
+            patch(
+                "authsome_mcp_proxy.external_oidc.webbrowser.open",
+                side_effect=opened_urls.append,
+            ),
+            patch.object(auth, "_run_callback_server", side_effect=callback),
+            patch("httpx2.AsyncClient.post", return_value=token_response) as token_post,
+        ):
+            try:
+                await auth._perform_auth_flow()
+            except RuntimeError as e:
+                return e, token_post
+        return None, token_post
+
+    def test_discovery_keeps_iss_parameter_supported_flag(self):
+        """The RFC 9207 flag survives discovery parsing.
+
+        fastmcp's OIDCConfiguration drops undeclared fields; without the
+        subclass the flag would be lost and `iss` could never be required.
+        """
+        config = _ExternalOIDCConfiguration.model_validate(
+            {
+                "strict": False,
+                "issuer": ISSUER,
+                "authorization_response_iss_parameter_supported": True,
+            }
+        )
+
+        assert config.authorization_response_iss_parameter_supported is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("iss_supported", [True, False])
+    async def test_matching_iss_is_accepted(self, tmp_path, iss_supported):
+        """A callback naming this provider proceeds to the token exchange,
+        whether or not the provider advertised `iss` support."""
+        auth = self._make_auth(tmp_path, iss_supported)
+
+        error, token_post = await self._run_flow(auth, ISSUER)
+
+        assert error is None
+        token_post.assert_called_once()
+        assert auth.context.get_access_token() == "access-token"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("iss_supported", [True, False])
+    async def test_mismatching_iss_is_rejected(self, tmp_path, iss_supported):
+        """A callback naming another server is a mix-up; it is rejected before
+        the code reaches the token endpoint, even without advertised support,
+        because a present `iss` identifies its sender either way."""
+        auth = self._make_auth(tmp_path, iss_supported)
+
+        error, token_post = await self._run_flow(auth, ATTACKER_ISSUER)
+
+        assert error is not None
+        assert str(error) == (
+            f"OAuth iss mismatch: {ATTACKER_ISSUER} != {ISSUER} - possible mix-up attack"
+        )
+        token_post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_configured_issuer_url_is_not_the_expected_iss(self, tmp_path):
+        """`iss` is compared with the discovery `issuer` by plain string
+        comparison (RFC 9207, section 2.4), so the configured issuer URL, which
+        differs by a trailing slash, does not match."""
+        auth = self._make_auth(tmp_path, True)
+
+        error, token_post = await self._run_flow(auth, CONFIGURED_ISSUER_URL)
+
+        assert error is not None
+        assert str(error).startswith("OAuth iss mismatch")
+        token_post.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_absent_iss_is_rejected_when_support_is_advertised(self, tmp_path):
+        """A provider advertising `iss` support always sends it, so a callback
+        without `iss` did not come from that provider."""
+        auth = self._make_auth(tmp_path, True)
+
+        error, token_post = await self._run_flow(auth, None)
+
+        assert error is not None
+        assert str(error) == (
+            f"OAuth iss missing: expected {ISSUER} - possible mix-up attack"
+        )
+        token_post.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("iss_supported", [False, None])
+    async def test_absent_iss_is_accepted_without_advertised_support(
+        self, tmp_path, iss_supported
+    ):
+        """Providers that do not implement RFC 9207 omit `iss`; requiring it
+        would lock their users out. An explicit `false` and an absent flag
+        mean the same."""
+        auth = self._make_auth(tmp_path, iss_supported)
+
+        error, token_post = await self._run_flow(auth, None)
+
+        assert error is None
+        token_post.assert_called_once()
+        assert auth.context.get_access_token() == "access-token"
