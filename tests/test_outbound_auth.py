@@ -25,6 +25,13 @@ from authsome_mcp_proxy.outbound_auth import (
     build_outbound_auth,
 )
 
+# What fastmcp's header forwarding puts on an upstream request: the downstream
+# client's own credentials, in the lowercase spelling it emits.
+_INBOUND_CREDENTIALS = {
+    "authorization": "Bearer inbound-token-for-the-proxy",
+    "cookie": "session=inbound-cookie-for-the-proxy",
+}
+
 
 def _base_keycloak_kwargs() -> dict:
     return {
@@ -161,6 +168,70 @@ class TestStaticHeaderAuth:
         flow = auth.auth_flow(request)
         yielded = next(flow)
         assert yielded.headers["Authorization"] == "Bearer fresh"
+
+    def test_custom_header_name_strips_inbound_credentials(self):
+        # The proxy's transport copies the downstream client's Authorization
+        # onto the request before the auth flow runs; a custom header name
+        # would otherwise send it upstream next to the configured one.
+        auth = StaticHeaderAuth(header_name="X-API-Key", header_value="abc123")
+        request = httpx2.Request(
+            "GET", "https://upstream.example.com/", headers=_INBOUND_CREDENTIALS
+        )
+        yielded = next(auth.auth_flow(request))
+        assert yielded.headers["X-API-Key"] == "abc123"
+        assert "Authorization" not in yielded.headers
+        assert "Cookie" not in yielded.headers
+
+    def test_authorization_header_name_strips_inbound_cookie(self):
+        auth = StaticHeaderAuth(
+            header_name="authorization", header_value="Bearer fresh"
+        )
+        request = httpx2.Request(
+            "GET", "https://upstream.example.com/", headers=_INBOUND_CREDENTIALS
+        )
+        yielded = next(auth.auth_flow(request))
+        # Header names are case-insensitive: a lowercase configured name still
+        # replaces the inbound value rather than sitting next to it.
+        assert yielded.headers.get_list("Authorization") == ["Bearer fresh"]
+        assert "Cookie" not in yielded.headers
+
+
+class TestStripsInboundCookie:
+    """Every outbound mode drops the downstream client's cookie."""
+
+    @pytest.mark.asyncio
+    async def test_forward_mode(self):
+        mock_token = MagicMock(token="session-token-xyz")
+        with patch(
+            "authsome_mcp_proxy.outbound_auth.get_access_token",
+            return_value=mock_token,
+        ):
+            request = httpx2.Request(
+                "GET", "https://upstream.example.com/", headers=_INBOUND_CREDENTIALS
+            )
+            yielded = (
+                await ForwardSessionTokenAuth().async_auth_flow(request).__anext__()
+            )
+
+        assert yielded.headers.get_list("Authorization") == ["Bearer session-token-xyz"]
+        assert "Cookie" not in yielded.headers
+
+    @pytest.mark.asyncio
+    async def test_oauth_client_credentials_mode(self):
+        auth = OAuthClientCredentialsAuth(
+            token_url="https://idp.example.com/token",
+            client_id="cid",
+            client_secret="csec",
+        )
+        auth._access_token = "cached-token"
+        auth._expires_at = time.time() + 3600
+        request = httpx2.Request(
+            "GET", "https://upstream.example.com/", headers=_INBOUND_CREDENTIALS
+        )
+        yielded = await auth.async_auth_flow(request).__anext__()
+
+        assert yielded.headers.get_list("Authorization") == ["Bearer cached-token"]
+        assert "Cookie" not in yielded.headers
 
 
 class TestOAuthClientCredentialsAuth:
