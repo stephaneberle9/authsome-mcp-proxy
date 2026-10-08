@@ -340,7 +340,7 @@ Test matrix:
 
 ### Lowest Dependency Versions
 
-**Workflow:** `run-lowest.yml`
+**Workflow:** `run-test-lowest.yml`
 
 Runs automatically on:
 
