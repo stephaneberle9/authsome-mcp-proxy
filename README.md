@@ -40,6 +40,8 @@ The proxy can run as:
   - [Azure (Entra ID)](#azure-entra-id)
   - [Connecting downstream MCP clients](#connecting-downstream-mcp-clients)
   - [Identity advertised to downstream clients](#identity-advertised-to-downstream-clients)
+  - [Serving several hostnames from one deployment](#serving-several-hostnames-from-one-deployment)
+  - [Serving several upstreams from one deployment](#serving-several-upstreams-from-one-deployment)
 - [Local Stdio Proxy (Developer Use)](#local-stdio-proxy-developer-use)
   - [Claude Desktop / Cursor / Codex](#claude-desktop--cursor--codex)
   - [Claude Code](#claude-code)
@@ -435,6 +437,86 @@ the `Host` header cannot tell them apart.
 > and dispatches on `Host` — a duplicated front door, not a duplicated
 > backend.
 
+## Serving several upstreams from one deployment
+
+One proxy can also front several upstream MCP servers, each under its own
+path, behind a single sign-in — a repository server that validates the
+user's token next to a read-only knowledge base that validates nothing,
+say. Name the upstreams in `UPSTREAMS` instead of setting
+`UPSTREAM_MCP_URL`, and give each one its URL:
+
+```bash
+UPSTREAMS=secure,emb3d
+UPSTREAM_SECURE_MCP_URL=http://secure-repository:8080/mcp
+UPSTREAM_EMB3D_MCP_URL=http://emb3d:8080/mcp
+UPSTREAM_EMB3D_OUTBOUND_AUTH=none
+UPSTREAM_EMB3D_PROXY_NAME="MITRE EMB3D"
+DEFAULT_UPSTREAM=secure
+```
+
+On the command line, the routes themselves can be given as flags — the
+per-upstream settings exist only as environment variables:
+
+```bash
+uvx authsome-mcp-proxy ... \
+  --upstream secure=http://secure-repository:8080/mcp \
+  --upstream emb3d=http://emb3d:8080/mcp \
+  --default-upstream secure
+```
+
+Each upstream `NAME` is served at `{base_url}/NAME/mcp` — that is the URL
+clients connect to — with its protected-resource metadata at
+`{base_url}/.well-known/oauth-protected-resource/NAME/mcp`. Names are
+lower-case letters, digits and `-`; in variable names they are upper-cased
+with `-` turned into `_`, so `knowledge-base` reads
+`UPSTREAM_KNOWLEDGE_BASE_MCP_URL`.
+
+**Per upstream** are the URL, the outbound auth
+(`UPSTREAM_<NAME>_OUTBOUND_*`), the identity advertised to clients
+(`UPSTREAM_<NAME>_PROXY_*`) and the MCP sessions: a session opened on one
+path is unknown on every other. Each `UPSTREAM_<NAME>_*` setting is
+optional and falls back to its global counterpart — `OUTBOUND_AUTH`,
+`OUTBOUND_HEADER_VALUE`, `MCP_PROXY_NAME` and so on — so settings common to
+all upstreams are written once.
+
+**Shared** is the OAuth identity: one IdP client, one
+`{base_url}/auth/callback` to register, one `/authorize`, `/token` and
+`/register`, and one authorization-server metadata document at the root. A
+user who signs in while connecting to one upstream is signed in for all of
+them — a token issued for `/secure/mcp` is accepted at `/emb3d/mcp` on the
+same hostname.
+
+`OUTBOUND_AUTH=none` (globally, or per upstream as above) sends the upstream
+no credential at all. The user's token is not merely left out but removed:
+the proxy otherwise passes the downstream request's `Authorization` header
+along, and an upstream that authenticates nobody has no business seeing a
+token that is valid for its neighbours.
+
+`DEFAULT_UPSTREAM` additionally serves that upstream at the familiar `/mcp`
+with its metadata at `/.well-known/oauth-protected-resource/mcp`. To turn a
+single-upstream deployment into a multi-upstream one, move
+`UPSTREAM_MCP_URL` to `UPSTREAM_<NAME>_MCP_URL`, list `NAME` in `UPSTREAMS`
+and set `DEFAULT_UPSTREAM=NAME`: existing clients keep their URL. With the
+`oidc`, `aws-cognito`, `google` and `azure` providers they sign in once more
+after the switch, because the proxy now binds the tokens it issues to the
+whole hostname rather than to `/mcp`.
+
+Upstreams are connected per client session, never at startup, so the proxy
+starts and serves every route while one upstream is down; only requests to
+that upstream fail. `UPSTREAMS` and `UPSTREAM_MCP_URL` are mutually
+exclusive, and several upstreams need `--transport http`. Combined with
+[several hostnames](#serving-several-hostnames-from-one-deployment), every
+hostname is its own identity serving every upstream.
+
+> [!NOTE]
+> Running one proxy per upstream behind a path-routing ingress does not
+> get you here. Each instance would be a separate OAuth identity with its
+> own IdP callback, and each would need the same root-level
+> `/.well-known/oauth-authorization-server`, `/authorize` and `/token` —
+> paths an ingress can send to only one of them. The proxy instead builds
+> one app per upstream over one auth provider per hostname and dispatches
+> on the path, so the authorization server and all of its state exist once.
+
 # Local Stdio Proxy (Developer Use)
 
 The original mode — the proxy is launched as a subprocess by the MCP
@@ -680,11 +762,30 @@ All options can be set via CLI flags or matching environment variables
 
 ## Environment variables and CLI flags
 
-**Upstream coordinates** — required:
+**Upstream coordinates** — either a single upstream or several (http mode):
 
 | Env var | CLI flag | Description |
 |---|---|---|
-| `UPSTREAM_MCP_URL` | (positional) | URL of the upstream MCP server. |
+| `UPSTREAM_MCP_URL` | (positional) | URL of the upstream MCP server, served at `/mcp`. |
+| `UPSTREAMS` | `--upstream NAME=URL` (repeatable) | Comma-separated names of several upstreams, each served at `/NAME/mcp` — see [Serving several upstreams from one deployment](#serving-several-upstreams-from-one-deployment). Mutually exclusive with `UPSTREAM_MCP_URL`. |
+| `UPSTREAM_<NAME>_MCP_URL` | (the `URL` of `--upstream`) | URL of upstream `NAME`. |
+| `DEFAULT_UPSTREAM` | `--default-upstream NAME` | Upstream additionally served at `/mcp`, for clients of a former single-upstream deployment. |
+
+**Per-upstream settings** (environment only, with `UPSTREAMS`) — each
+optional, falling back to its global counterpart:
+
+| Env var | Falls back to |
+|---|---|
+| `UPSTREAM_<NAME>_OUTBOUND_AUTH` | `OUTBOUND_AUTH` |
+| `UPSTREAM_<NAME>_OUTBOUND_HEADER_NAME` | `OUTBOUND_HEADER_NAME` |
+| `UPSTREAM_<NAME>_OUTBOUND_HEADER_VALUE` | `OUTBOUND_HEADER_VALUE` |
+| `UPSTREAM_<NAME>_OUTBOUND_CLIENT_ID` | `OUTBOUND_CLIENT_ID` |
+| `UPSTREAM_<NAME>_OUTBOUND_CLIENT_SECRET` | `OUTBOUND_CLIENT_SECRET` |
+| `UPSTREAM_<NAME>_OUTBOUND_TOKEN_URL` | `OUTBOUND_TOKEN_URL` |
+| `UPSTREAM_<NAME>_PROXY_NAME` | `MCP_PROXY_NAME` |
+| `UPSTREAM_<NAME>_PROXY_VERSION` | `MCP_PROXY_VERSION` |
+| `UPSTREAM_<NAME>_PROXY_INSTRUCTIONS` | `MCP_PROXY_INSTRUCTIONS` |
+| `UPSTREAM_<NAME>_PROXY_WEBSITE_URL` | `MCP_PROXY_WEBSITE_URL` |
 
 **Proxy runtime** — all optional:
 
@@ -727,7 +828,7 @@ extra fields):
 
 | Env var | CLI flag | Description |
 |---|---|---|
-| `OUTBOUND_AUTH` | `--outbound-auth {forward,oauth-client-credentials,static}` | Outbound mechanism. |
+| `OUTBOUND_AUTH` | `--outbound-auth {forward,none,oauth-client-credentials,static}` | Outbound mechanism. `none` sends the upstream no credential: the user's token is removed from the headers the proxy forwards. Other headers the client sends, such as `X-Api-Key`, still pass through in every mode, as before. |
 | `OUTBOUND_TOKEN_URL` | `--outbound-token-url` | Token endpoint for `oauth-client-credentials`. |
 | `OUTBOUND_CLIENT_ID` | `--outbound-client-id` | Client ID for `oauth-client-credentials`. |
 | `OUTBOUND_CLIENT_SECRET` | `--outbound-client-secret` | Client secret for `oauth-client-credentials`. |
@@ -804,6 +905,12 @@ that's `http://localhost:8080/auth/callback` (or whatever
 trailing slashes. When `MCP_PROXY_BASE_URL` lists several hostnames, *each*
 one needs its own callback registered — a hostname whose callback is missing
 fails only at the end of the flow, after the user has already logged in.
+
+**A client rejects a route's metadata, or reports a resource mismatch**
+— with several upstreams, connect to the route's own URL
+(`{base_url}/NAME/mcp`); `/mcp` exists only with `DEFAULT_UPSTREAM`. The
+metadata a client fetches names the URL it connected to as the resource,
+and clients compare the two.
 
 **One hostname advertises another in its OAuth metadata** — the proxy is
 running with only that other hostname in `MCP_PROXY_BASE_URL`. Adding a host
