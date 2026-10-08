@@ -19,6 +19,7 @@
 - [CI/CD Workflows](#cicd-workflows)
   - [Static Analysis](#static-analysis)
   - [Test Suite](#test-suite)
+  - [Lowest Dependency Versions](#lowest-dependency-versions)
   - [Publishing](#publishing)
 - [Release Process](#release-process)
 - [Building Packages](#building-packages)
@@ -331,6 +332,28 @@ Runs automatically on:
 - Push to `main` branch (when source files change)
 - All pull requests
 - Manual trigger via workflow dispatch
+
+Test matrix:
+
+- **OS**: Ubuntu, Windows
+- **Python**: 3.10
+
+### Lowest Dependency Versions
+
+**Workflow:** `run-test-lowest.yml`
+
+Runs automatically on:
+
+- Push to `main` branch (when source files change)
+- All pull requests
+- Manual trigger via workflow dispatch
+
+Checks performed:
+
+- Discards `uv.lock` and resolves with `uv lock --resolution lowest-direct`, which picks the floor declared in `pyproject.toml` for each direct dependency and the newest version of everything below them
+- Installs only the `test` group from that resolution and runs the test suite, proving that the floors still work
+
+The resolution is never committed. If the job fails, raise the floor that is too low in `pyproject.toml` rather than excluding the job.
 
 Test matrix:
 

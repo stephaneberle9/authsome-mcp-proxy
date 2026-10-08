@@ -1,0 +1,77 @@
+name: Run tests against lowest dependencies
+
+# pyproject.toml declares floors, not caps, so every version from each floor up
+# is a promise to users. run-tests.yml tests the versions pinned in uv.lock and
+# run-smoke.yml the newest ones the constraints allow; neither installs the
+# oldest. This job resolves each direct dependency to its floor and runs the
+# test suite there, so a floor that admits a version lacking an API the code
+# relies on fails here instead of in a user's environment.
+
+env:
+  # Enable colored output
+  PY_COLORS: 1
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "src/**"
+      - "tests/**"
+      - "uv.lock"
+      - "pyproject.toml"
+      - ".github/workflows/**"
+
+  pull_request:
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  run_lowest:
+    name: "Run tests against lowest dependencies: Python ${{ matrix.python-version }} on ${{ matrix.os }}"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        # 3.10 is the requires-python floor, so it is the lowest interpreter too
+        python-version: ["3.10"]
+      fail-fast: false
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.1.0
+        with:
+          enable-cache: true
+          # uv.lock is deleted below, so keying the cache on it would be
+          # meaningless; the floors that drive this resolution live here
+          cache-dependency-glob: "pyproject.toml"
+          python-version: ${{ matrix.python-version }}
+
+      - name: Resolve direct dependencies to their floors
+        # lowest-direct takes the floor of each dependency declared in
+        # pyproject.toml and the newest of everything below them, isolating the
+        # floors this project controls. The existing lock must go first: on top
+        # of it, uv lock keeps the versions already locked.
+        run: |
+          rm uv.lock
+          uv lock --resolution lowest-direct
+
+      - name: Install dependencies
+        # --frozen installs the lowest-direct lock as is; without it, uv would
+        # re-resolve with the default strategy and install the newest versions.
+        # Only the test group: lowest-direct also lowers the unbounded dev
+        # tools, e.g. to a ruff with no Windows wheel that fails to build.
+        run: uv sync --frozen --no-default-groups --group test
+
+      - name: Show resolved versions
+        run: uv tree --frozen --no-default-groups --group test --depth 1
+
+      - name: Run tests
+        # Same flags as the sync, so uv run neither re-resolves nor installs
+        # the dev group
+        run: uv run --frozen --no-default-groups --group test pytest
