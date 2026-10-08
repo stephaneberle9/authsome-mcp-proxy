@@ -40,6 +40,7 @@ The proxy can run as:
   - [Azure (Entra ID)](#azure-entra-id)
   - [Connecting downstream MCP clients](#connecting-downstream-mcp-clients)
   - [Identity advertised to downstream clients](#identity-advertised-to-downstream-clients)
+  - [Surviving restarts](#surviving-restarts)
 - [Local Stdio Proxy (Developer Use)](#local-stdio-proxy-developer-use)
   - [Claude Desktop / Cursor / Codex](#claude-desktop--cursor--codex)
   - [Claude Code](#claude-code)
@@ -139,33 +140,35 @@ Browser           MCP Client (Claude.ai/Code/Inspector)
    │ ◄────────────────────►│ ◄──────────────────────────────┐
    │                       │                                │
    │                       │  2. tools, prompts, resources  │
-   │                       │     (Authorization: Bearer X)  │
-   │                       ▼                                │
+   │                       │     (Authorization: Bearer P,  │
+   │                       ▼      issued by the proxy)      │
    │            ┌─────────────────────┐                     │
-   │            │  authsome-mcp-proxy │                     │
-   │            │  --transport http   │                     │
-   │            └─────────────────────┘                     │
+   │            │  authsome-mcp-proxy │  looks up the IdP   │
+   │            │  --transport http   │  token U behind P   │
+   │            └─────────────────────┘  in its store       │
    │                       │                                │
-   │                       │  3. Authorization: Bearer X    │
+   │                       │  3. Authorization: Bearer U    │
    │                       ▼   (forwarded)                  │
    │            ┌─────────────────────┐                     │
    │            │   Upstream MCP      │                     │
    │            │   server            │                     │
    │            └─────────────────────┘                     │
    │                                                        │
-   └─── Same IdP issues tokens both sides validate ─────────┘
+   └─── Upstream MCP validates U against the same IdP ──────┘
 ```
 
 The proxy wears two OAuth 2.0 hats at the same time: it is an **OAuth 2.0
 client** against the upstream IdP / Authorization Server, and a
 **OAuth 2.0 Authorization Server** for the MCP client, which may identify
 itself either by Dynamic Client Registration or by
-[CIMD](#client-id-metadata-documents-cimd) URL. The
-only way it diverges from a stock AS is that it does not mint its own
-tokens — it forwards the upstream IdP's tokens through transparently,
-which is what makes `OUTBOUND_AUTH=forward` work end-to-end. For the full
-sequence diagram, persistence model, and pod-restart implications, see
-[docs/oauth-flow.md](docs/oauth-flow.md).
+[CIMD](#client-id-metadata-documents-cimd) URL. The MCP client never sees
+the upstream IdP's tokens: the proxy keeps them in its store and issues
+its own signed tokens that refer to them. On every request it swaps the
+client's token for the upstream one, which is what `OUTBOUND_AUTH=forward`
+sends on. For the full sequence diagram, persistence model, and
+pod-restart implications, see [docs/oauth-flow.md](docs/oauth-flow.md);
+for keeping sessions across restarts, see
+[Surviving restarts](#surviving-restarts).
 
 The proxy is IdP-agnostic — pick the inbound provider that matches your
 deployment via `--inbound-auth-provider`. The following sections give a
@@ -332,7 +335,9 @@ Two things follow from that. The client keeps one durable identity
 across every server it talks to, rather than a different `client_id` per
 proxy instance. And because the metadata lives at the client's own URL,
 the proxy can re-fetch it after a restart — where a DCR registration
-that lived only in the proxy's client store is simply gone.
+that lived only in the proxy's client store is simply gone. The client's
+*session* is not covered by that: its tokens live in the proxy's store
+like everyone else's, see [Surviving restarts](#surviving-restarts).
 
 CIMD is **enabled by default** and is purely additive: DCR keeps working
 exactly as before, so nothing changes for clients that don't use CIMD.
@@ -434,6 +439,75 @@ the `Host` header cannot tell them apart.
 > The proxy therefore builds one app per hostname over one shared server
 > and dispatches on `Host` — a duplicated front door, not a duplicated
 > backend.
+
+## Surviving restarts
+
+As the authorization server for its MCP clients (every provider except
+`keycloak`), the proxy keeps state: the clients registered through DCR,
+the upstream IdP's access and refresh tokens, and the mapping from the
+tokens it issued to them. It signs those tokens with a signing key. Both
+decide what a restart costs:
+
+- **Store.** By default the state lives in an encrypted file store under
+  `${FASTMCP_HOME}/oauth-proxy/` (`/app/.local/share/fastmcp/oauth-proxy/`
+  in the published image). On a VM with a normal disk that is durable. In
+  a container whose filesystem does not survive a restart, such as a
+  Kubernetes `Deployment`, every restart loses all registrations and signs
+  every user out — CIMD clients included, which keep only their
+  registration. A volume at that path helps, but turns the proxy into a
+  single-replica `StatefulSet`.
+- **Signing key.** Unset, the proxy derives the signing key — and from it
+  the store's encryption key and directory — from the upstream client
+  secret (`OIDC_CLIENT_SECRET`). Rotating that secret then invalidates every
+  issued token and strands everything stored, volume or not.
+
+A restart-safe deployment therefore sets both a signing key and an
+external store backend, shared by every replica:
+
+```bash
+uvx 'authsome-mcp-proxy[dynamodb]' ... \
+  --jwt-signing-key "$(openssl rand -base64 32)" \
+  --store-backend dynamodb \
+  --store-dynamodb-table authsome-mcp-proxy-oauth-state \
+  --store-dynamodb-region eu-central-1
+```
+
+Keep the signing key in a secret store and stable across deployments —
+generating it at startup, as in this one-liner, would defeat the purpose.
+With an external backend the proxy refuses to start without one. The
+values written to an external store are Fernet-encrypted with a key
+derived from it, the same way FastMCP encrypts its own file store, so the
+table never holds an upstream token in plaintext. A `JWT_SIGNING_KEY` is
+worth setting with the default file store too: it decouples the stored
+state from the upstream client secret.
+
+**DynamoDB.** The backend needs the `dynamodb` extra, which the published
+container image already includes. Credentials and region come from the
+AWS SDK's usual chain (IRSA or EKS Pod Identity, instance profile,
+`AWS_*` environment variables); `AWS_ENDPOINT_URL_DYNAMODB` points it at
+DynamoDB Local for testing. Create the table with your infrastructure
+code:
+
+| Property | Value |
+|---|---|
+| Partition key | `collection` (String) |
+| Sort key | `key` (String) |
+| Time to live | enabled on the attribute `ttl` |
+| Billing mode | any; on-demand fits the access pattern |
+
+The proxy needs `dynamodb:DescribeTable`, `dynamodb:DescribeTimeToLive`,
+`dynamodb:GetItem`, `dynamodb:PutItem` and `dynamodb:DeleteItem` on the
+table. It checks the table at startup and refuses to start, naming the
+table, if it is missing. `--store-dynamodb-auto-create` makes it create a
+missing table instead (on-demand, TTL enabled); that additionally needs
+`dynamodb:CreateTable` and `dynamodb:UpdateTimeToLive`, and is off by
+default so the proxy can run with the narrower permissions. Without TTL
+enabled on the table, the proxy also needs `dynamodb:UpdateTimeToLive` to
+enable it at startup.
+
+All of these settings are inert for `--inbound-auth-provider keycloak`,
+where Keycloak is the authorization server and the proxy keeps no OAuth
+state.
 
 # Local Stdio Proxy (Developer Use)
 
@@ -721,6 +795,17 @@ needs):
 | `AZURE_TENANT_ID` | `--azure-tenant-id` | Azure AD tenant ID. |
 | `AZURE_IDENTIFIER_URI` | `--azure-identifier-uri` | Azure Application ID URI used for scope prefixing. |
 | `ENABLE_CIMD` | `--enable-cimd` / `--no-enable-cimd` | Accept Client ID Metadata Documents from downstream clients. On by default — see [Client ID Metadata Documents (CIMD)](#client-id-metadata-documents-cimd). |
+
+**OAuth proxy state** (http mode, inert for `keycloak` — see
+[Surviving restarts](#surviving-restarts)):
+
+| Env var | CLI flag | Default | Description |
+|---|---|---|---|
+| `JWT_SIGNING_KEY` | `--jwt-signing-key` | _derived from `OIDC_CLIENT_SECRET`_ | Signs the tokens the proxy issues and keys its store's encryption. Required with a `STORE_BACKEND` other than `file`. |
+| `STORE_BACKEND` | `--store-backend {file,dynamodb}` | `file` | Where client registrations and sessions are kept. `dynamodb` needs the `dynamodb` extra. |
+| `STORE_DYNAMODB_TABLE` | `--store-dynamodb-table` | _required for `dynamodb`_ | DynamoDB table name. |
+| `STORE_DYNAMODB_REGION` | `--store-dynamodb-region` | _AWS SDK default_ | AWS region of the table. |
+| `STORE_DYNAMODB_AUTO_CREATE` | `--store-dynamodb-auto-create` / `--no-store-dynamodb-auto-create` | _off_ | Create the table at startup when it is missing, instead of refusing to start. |
 
 **Outbound auth** (http mode — `forward` is the default and needs no
 extra fields):
