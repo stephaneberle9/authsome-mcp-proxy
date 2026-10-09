@@ -28,7 +28,16 @@ dependencies = [
     #   4.0.6 keeps Google access tokens out of request URLs, and 4.0.8 revokes
     #   the upstream refresh token instead of sending the proxy's own token
     #   upstream.
-    "fastmcp>=4.0.8",
+    #
+    # The ceiling guards a private API. Web mode serves one ASGI app per public
+    # hostname over a single FastMCP server and holds that server's lifespan
+    # open through FastMCP._lifespan_manager(), relying on it being
+    # reference-counted so the per-hostname apps share one lifespan instead of
+    # each running it. No public API offers that for several apps (checked
+    # through 4.1.0), and a private method carries no compatibility promise:
+    # uvx users resolve the newest fastmcp at install time, so a major that
+    # renames it or drops the counting would break them before CI noticed.
+    "fastmcp>=4.0.8,<5",
     "py-key-value-aio[disk]>=0.3.0",
     # Both arrive transitively via fastmcp, but web mode imports them directly --
     # starlette for the ASGI types the host router is written against, uvicorn to

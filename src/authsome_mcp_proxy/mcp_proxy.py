@@ -280,6 +280,12 @@ async def _serve_http(
         config_kwargs["log_level"] = resolved_log_level
 
     with temporary_log_level(log_level):
+        # Private on purpose, and why fastmcp is capped below 5: the public
+        # per-app lifespans each enter this same manager through their session
+        # manager, so they share one server lifespan only because it is
+        # reference-counted -- a property no public API promises. Holding it
+        # open here, as run_http_async does, keeps the server lifespan running
+        # from before the first child starts until after the last one stops.
         async with mcp_proxy._lifespan_manager():
             for base_url in config.all_proxy_base_urls:
                 logger.info("Serving MCP proxy at %s%s", base_url.rstrip("/"), mcp_path)

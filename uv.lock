@@ -409,7 +409,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.9" },
     { name = "cryptography", specifier = ">=45.0.0" },
     { name = "exceptiongroup", specifier = ">=1.2.2" },
-    { name = "fastmcp", specifier = ">=4.0.8" },
+    { name = "fastmcp", specifier = ">=4.0.8,<5" },
     { name = "httpx2", specifier = ">=2.5.0" },
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "py-key-value-aio", extras = ["disk"], specifier = ">=0.3.0" },
