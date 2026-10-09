@@ -45,9 +45,12 @@ COPY src/ ./src/
 # /app/.venv. `--no-dev` keeps test/dev tooling out of the production layer;
 # `--no-editable` installs the project as a normal wheel (rather than a
 # `.pth`-pointer back to src/) so the production stage doesn't need a copy
-# of src/ on disk.
+# of src/ on disk. `--all-extras` bundles every store backend (STORE_BACKEND)
+# so the published image can be pointed at any of them by configuration alone;
+# the proxy imports a backend's SDK only when it is selected. Build without it
+# for a minimal image that only uses the default file store.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-editable
+    uv sync --frozen --no-dev --no-editable --all-extras
 
 
 # ---------------------------------------------------------------------------
@@ -68,7 +71,8 @@ WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 
 # HOME=/app: FastMCP's OAuthProxy (parent of AWSCognitoProvider et al.)
-# auto-creates a FileTreeStore for downstream DCR client registrations at
+# auto-creates a FileTreeStore for its OAuth state -- client registrations and
+# users' sessions -- unless STORE_BACKEND selects an external one, at
 # `settings.home`, which defaults to `user_data_dir("fastmcp")` →
 # `~/.local/share/fastmcp`. `useradd -r` (above) doesn't create
 # /home/appuser, so the mkdir fails with `Permission denied: '/home/appuser'`

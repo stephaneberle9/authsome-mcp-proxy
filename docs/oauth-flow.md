@@ -33,7 +33,7 @@ and where.
 | Auth between MCP client and proxy | Full OAuth 2.0 + DCR + PKCE | None — local trust (the MCP client launches the proxy as its child) |
 | Who registers with the upstream IdP | The proxy, once, statically | The proxy, once, statically (per user) |
 | Who does the OAuth flow against the upstream IdP | The proxy, on behalf of every MCP client that connects | The proxy, on behalf of the single local user |
-| Where tokens are cached | On the proxy's filesystem, briefly during the flow; **persistently on the MCP client** afterwards | On the proxy's filesystem (local user's home directory) |
+| Where tokens are cached | The upstream IdP's tokens **in the proxy's store** (an encrypted file store by default, or an external backend); the proxy's own tokens, which refer to them, **on the MCP client** | On the proxy's filesystem (local user's home directory) |
 | Browser pops up on which machine | The MCP client's user's machine (could be remote — e.g. Cowork in a browser) | The local user's machine |
 | Concurrency | Many users share one proxy instance, each with isolated upstream sessions | Single user per proxy process |
 
@@ -65,13 +65,16 @@ and the architecture only makes sense once you separate them:
 | **OAuth 2.0 _client_** | Upstream IdP / Authorization Server (Cognito, Keycloak, Google, Azure, generic OIDC) | The proxy is a single, pre-registered confidential client of the upstream IdP. | Static `client_id` + `client_secret` for the upstream IdP, loaded from the proxy's env (`OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`). |
 | **OAuth 2.0 _Authorization Server_** | The MCP client (Claude.ai/Cowork, Inspector, `mcp-remote`, …) | The proxy exposes a full OAuth AS surface (`/register`, `/authorize`, `/token`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/...`) with **Dynamic Client Registration** (RFC 7591) and **Client ID Metadata Documents** (CIMD, SEP-991). MCP clients either self-register at runtime or present an HTTPS URL as their `client_id`. | None per-MCP-client at registration time — a DCR client gets its own proxy-issued `client_id` (and `client_secret` if confidential); a CIMD client brings its own, and the proxy fetches its metadata from that URL. |
 
-**The only way in which the proxy diverges from a "normal" OAuth AS:**
-it does not mint its own access or refresh tokens. The tokens it hands
-to MCP clients are the upstream IdP's tokens, passed through transparently.
-This is what makes `OUTBOUND_AUTH=forward` work — the same bearer that
-authenticated the MCP client against the proxy is also valid against the
-upstream MCP server (assuming the upstream MCP server validates tokens
-against the same IdP, which is the standard deployment).
+**The tokens the proxy hands to MCP clients are its own.** It keeps the
+upstream IdP's access and refresh tokens in its store and issues the MCP
+client a short JWT, signed with its signing key, that refers to them by
+an ID. On every request it verifies that JWT, looks up the upstream
+token behind it, and validates the upstream token against the IdP. This
+is what `OUTBOUND_AUTH=forward` relies on: the bearer it sends to the
+upstream MCP server is the upstream IdP's token found in the store, not
+the one the MCP client presented (the upstream MCP server validates it
+against the same IdP, which is the standard deployment). The MCP client
+never sees an upstream token.
 
 Why bridge DCR onto a static-client IdP at all? MCP clients
 (Claude.ai/Cowork, Inspector, `mcp-remote`, …) expect to self-register
@@ -115,8 +118,8 @@ MCP client                    proxy                       Upstream IdP / AS
                           │   client_secret=PROXY_STATIC_UPSTREAM_SECRET  ← THE SECRET
                           │ ◄────────── access_token+refresh_token
                           │
-                          │ stores upstream tokens transiently, indexed by
-                          │ a NEW proxy-issued auth code = PROXY_CODE
+                          │ stores upstream tokens, indexed by a NEW
+                          │ proxy-issued auth code = PROXY_CODE
                           │
                           │ redirects browser ──┐
                           │                     ▼
@@ -128,11 +131,12 @@ MCP client                    proxy                       Upstream IdP / AS
    │   code_verifier=<PKCE>             ← no secret; PKCE proves the MCP
    │                                       client is the same DCR registration
    │                                       that initiated the flow
-   │ ◄───── proxy looks up the upstream tokens it stored
-   │        against PROXY_CODE, hands them straight back
+   │ ◄───── proxy moves the upstream tokens it stored against
+   │        PROXY_CODE into its token store, and returns its OWN
+   │        access + refresh token that refer to them
    │
    ▼
- has upstream-issued access_token + refresh_token (location depends on client)
+ has proxy-issued access_token + refresh_token (location depends on client)
 ```
 
 The proxy is the **client** in the upper half (its OAuth-2.0-client hat)
@@ -142,16 +146,16 @@ stitches together through the temporary `PROXY_CODE`.
 
 ### Detailed step-by-step
 
-| # | Wire event | Server-side record (proxy's `${FASTMCP_HOME}/oauth-proxy/<key>/`, Fernet-encrypted) | Client-side record (location depends on the MCP client — see below) |
+| # | Wire event | Server-side record (proxy's store, Fernet-encrypted — see [What persists](#what-persists-what-doesnt)) | Client-side record (location depends on the MCP client — see below) |
 |---|---|---|---|
-| 1 | MCP client → proxy: `POST /register` (DCR, RFC 7591) — **skipped by CIMD clients**, which send their document URL as `client_id` and let the proxy fetch it in step 2a | **DCR client record** — `{dcr_client_id, dcr_client_secret, redirect_uris, scopes, …}`. The only thing the proxy needs to look up later to recognise this particular MCP client. Bridges DCR onto the proxy's single pre-registered upstream client. | **Client credentials** — the `dcr_client_id` (+ secret if confidential) the proxy just issued back. Reused on every future flow against this server. |
+| 1 | MCP client → proxy: `POST /register` (DCR, RFC 7591) — **skipped by CIMD clients**, which send their document URL as `client_id` and let the proxy fetch it in step 2a | **DCR client record** — `{dcr_client_id, redirect_uris, scopes, …}`, registered as a public client (no secret). What the proxy looks up later to recognise this particular MCP client. Bridges DCR onto the proxy's single pre-registered upstream client. | **Client credentials** — the `dcr_client_id` the proxy just issued back. Reused on every future flow against this server. |
 | 2a | MCP client → proxy: `GET /authorize` | **Transaction state** — `{txn_id, state, code_challenge, redirect_uri, requested_scopes, dcr_client_id, …}`. Short-lived; consumed in step 3. | *(in-memory PKCE verifier only — not on disk)* |
 | 2b | proxy → upstream IdP: `GET /authorize` (via browser redirect) | *(no new persistent record — the transaction state from 2a is updated with the upstream-side `state` value)* | *(nothing — browser only)* |
 | 3a | upstream IdP → proxy: `GET /callback?code=UPSTREAM_CODE` (via browser redirect) | **Transient** — upstream auth code held in memory until 3b completes. | *(nothing — the browser is currently on the proxy's domain)* |
-| 3b | proxy → upstream IdP: `POST /token` (server-to-server) | **Upstream tokens received** — the proxy authenticates with its own upstream `client_secret` (loaded from env). Receives the real upstream `access_token` + `refresh_token`. Stores them transiently, indexed by a freshly-generated `PROXY_CODE`. | *(nothing — server-to-server call)* |
+| 3b | proxy → upstream IdP: `POST /token` (server-to-server) | **Upstream tokens received** — the proxy authenticates with its own upstream `client_secret` (loaded from env). Receives the real upstream `access_token` + `refresh_token`. Stores them, short-lived, indexed by a freshly-generated `PROXY_CODE`. | *(nothing — server-to-server call)* |
 | 3c | proxy → MCP client: redirect browser to `<mcp-client-redirect>?code=PROXY_CODE` | *(no new record — `PROXY_CODE` was created in 3b)* | *(nothing yet — the local callback handler is about to fire)* |
-| 3d | MCP client → proxy: `POST /token` (PKCE, no secret) | Proxy verifies `code_verifier` against the `code_challenge` from step 2a, looks up the upstream tokens stored against `PROXY_CODE`, hands them straight to the MCP client, then **deletes** the transaction record and the `PROXY_CODE → tokens` mapping. | **Upstream-issued access token + refresh token** — these are real JWTs from the upstream IdP. The MCP client puts the access token in `Authorization: Bearer …` on every subsequent JSON-RPC frame; when it expires, it calls `/token` again with `grant_type=refresh_token`. |
-| 4 | MCP client → proxy: `POST /mcp` (every JSON-RPC frame) | *(no state lookup needed for the bearer itself — proxy validates the JWT against the upstream IdP's public JWKS, which it caches in memory. In `OUTBOUND_AUTH=forward` it attaches the **same** JWT to the call to the upstream MCP server, which validates it against the same JWKS.)* | *(no change — reuses the cached access token; silently runs the `/token` refresh dance when expired)* |
+| 3d | MCP client → proxy: `POST /token` (PKCE, no secret) | Proxy verifies `code_verifier` against the `code_challenge` from step 2a and deletes `PROXY_CODE`. It moves the upstream tokens into the **upstream token store** (kept until the longest-lived token expires), issues its own access and refresh token — JWTs signed with the proxy's signing key, each carrying a random `jti` — and stores a **`jti` → upstream token mapping** for each, plus **refresh-token metadata** keyed by a hash of the refresh token. | **Proxy-issued access token + refresh token** — not the upstream IdP's. The MCP client puts the access token in `Authorization: Bearer …` on every subsequent JSON-RPC frame; when it expires, it calls `/token` again with `grant_type=refresh_token`. |
+| 4 | MCP client → proxy: `POST /mcp` (every JSON-RPC frame) | Proxy verifies the bearer's signature with its signing key, **looks up the upstream token** through the `jti` mapping, and validates that upstream token against the IdP (JWKS, cached in memory), refreshing it upstream first if it is about to expire. A bearer whose mapping is gone is rejected as invalid. In `OUTBOUND_AUTH=forward` the **upstream** token is what goes to the upstream MCP server. | *(no change — reuses the cached access token; silently runs the `/token` refresh dance when expired)* |
 
 ### Where the client-side record lives (per client)
 
@@ -178,53 +182,75 @@ is talking to it.
 
 After step 3d completes:
 
-- **Server side (proxy):** only the **DCR client record** from step 1
-  persists. All transaction state and the transient
-  `PROXY_CODE → upstream_tokens` mapping have been deleted. The proxy
-  never holds long-term token storage of its own.
-- **Client side (MCP client):** the **DCR `client_id`** (and
-  `client_secret` if any) from step 1, plus the **upstream-issued access
-  + refresh tokens** received in step 3d. Where these live depends on
-  the MCP client (see table above).
+- **Server side (proxy):** the proxy's store holds, per collection:
+  - `mcp-oauth-proxy-clients` — the **DCR client records** from step 1
+    (CIMD clients are not stored; the proxy caches their documents in
+    memory and re-fetches them);
+  - `mcp-upstream-tokens` — the **upstream IdP's access and refresh
+    tokens**;
+  - `mcp-jti-mappings` — the mapping from each proxy-issued token's
+    `jti` to the upstream tokens;
+  - `mcp-refresh-tokens` — metadata of the proxy-issued refresh tokens.
+
+  Transaction state and `PROXY_CODE` are short-lived and gone. Every
+  entry is Fernet-encrypted with a key derived from the proxy's signing
+  key.
+- **Client side (MCP client):** the **DCR `client_id`** from step 1,
+  plus the **proxy-issued access + refresh tokens** received in step 3d.
+  Where these live depends on the MCP client (see table above).
+
+The **signing key** both signs the proxy's tokens and, through a key
+derivation, encrypts the store. Unless `JWT_SIGNING_KEY` sets it, FastMCP
+derives it from the upstream `client_secret`.
+
+The **store** is FastMCP's encrypted file store under
+`${FASTMCP_HOME}/oauth-proxy/<key>/` by default, where `<key>` is a
+fingerprint of the encryption key. `${FASTMCP_HOME}` defaults to
+`${HOME}/.local/share/fastmcp/` and resolves to
+`/app/.local/share/fastmcp/` inside the container with the project's
+default `HOME=/app`. `STORE_BACKEND` replaces it with an external
+backend (currently DynamoDB), which the proxy wraps in the same Fernet
+encryption; an external backend requires `JWT_SIGNING_KEY`. When several
+hostnames are served, all of their providers share the one store.
 
 ### Implications for pod-restart resilience
 
-If the proxy pod restarts without a persistent volume backing its
-storage directory:
+If the proxy pod restarts with the default file store and no persistent
+volume backing its directory, the whole store is lost:
 
 - The **DCR registry dies** → every MCP client that was registered now
-  holds a `dcr_client_id` the proxy doesn't recognise.
-- On the next `/token` call (or the next refresh attempt), the proxy
-  returns `invalid_client` (RFC 6749 §5.2).
-- Well-behaved MCP clients detect this, drop their local cache for the
-  server, and re-run the full flow (browser popup, user login, fresh
-  DCR registration). Less-forgiving clients may need manual
-  re-registration.
+  holds a `dcr_client_id` the proxy doesn't recognise. On the next
+  `/authorize` or `/token` call the proxy returns `invalid_client`
+  (RFC 6749 §5.2). Well-behaved MCP clients drop their local cache for
+  the server and re-run the full flow (browser popup, user login, fresh
+  DCR registration); clients that register once and cache the result
+  need manual re-registration.
+- **Every session dies** → the tokens MCP clients hold are the proxy's
+  own, and the `jti` mappings to the upstream tokens behind them are gone.
+  The signature still verifies — the signing key is derived the same way
+  after the restart — but the lookup fails, so every request is rejected
+  as unauthorized and every user has to sign in again.
 
-**CIMD clients are the exception.** Their `client_id` is a URL the client
-hosts, not a record the proxy issued, so a restarted proxy simply
-re-fetches the document and recognises them again. Nothing to persist,
-no re-registration, no browser popup — the client's tokens keep working.
-For a deployment whose MCP clients all speak CIMD, the DCR continuity
-problem below disappears.
+**CIMD clients keep their registration, not their session.** Their
+`client_id` is a URL the client hosts, not a record the proxy issued, so
+a restarted proxy simply re-fetches the document and recognises them
+again — no re-registration. Their tokens, however, refer into the store
+like everyone else's, so the user still has to sign in again.
 
-Tokens themselves are *not* affected by a pod restart — they're plain
-upstream-IdP-issued JWTs, validated by the upstream's public JWKS, and
-the MCP client already holds them locally. They become unreachable only
-because the proxy no longer recognises the DCR client they were issued
-to.
+A **rotation of the upstream client secret** has the same effect even on
+a persistent volume when `JWT_SIGNING_KEY` is unset: the signing key
+changes with the secret, so every issued token fails signature
+validation, and the encryption key and store directory change with it,
+leaving the old records unreachable.
 
-So a persistent volume on this deployment is a **DCR continuity** volume,
-not a *token cache* volume. The path to persist is the proxy's
-`${FASTMCP_HOME}/oauth-proxy/<key>/`, which defaults to
-`${HOME}/.local/share/fastmcp/oauth-proxy/<key>/` (and resolves to
-`/app/.local/share/fastmcp/oauth-proxy/<key>/` inside the container with
-the project's default `HOME=/app`).
-
-The trade-off is the usual one for stateful Kubernetes workloads —
-`Deployment` + ephemeral storage costs nothing but forces re-registration
-on every pod restart; `StatefulSet` + `PersistentVolumeClaim` keeps DCR
-registrations sticky across restarts but adds operational complexity.
+A persistent volume at `${FASTMCP_HOME}/oauth-proxy/` therefore keeps
+registrations and sessions only until the next secret rotation, and makes
+the proxy a single-replica `StatefulSet` pinned to the volume's
+availability zone. The alternative that keeps both, survives rotations
+and allows several replicas is a stable `JWT_SIGNING_KEY` plus an
+external store backend (`STORE_BACKEND=dynamodb`) that every replica
+shares; the README section
+[Surviving restarts](../README.md#surviving-restarts) describes the setup.
 
 ## Desktop (stdio) mode
 

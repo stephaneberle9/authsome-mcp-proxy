@@ -159,6 +159,62 @@ class TestWebConfigInbound:
         assert config.azure_tenant_id == "tid"
 
 
+class TestWebConfigStore:
+    """Startup refusals for the OAuth proxy's store backend."""
+
+    def _oidc(self, **overrides) -> WebConfig:
+        return WebConfig(
+            inbound_auth_provider="oidc",
+            proxy_base_url="https://mcp.example.com",
+            issuer_url="https://idp.example.com",
+            client_id="cid",
+            client_secret="csec",
+            **overrides,
+        )
+
+    def test_defaults_keep_fastmcps_file_store(self):
+        config = self._oidc()
+        assert config.store_backend == "file"
+        assert config.jwt_signing_key is None
+        assert config.store_dynamodb_auto_create is False
+
+    def test_file_store_needs_no_signing_key(self):
+        """The default store's startup is unchanged: neither check runs."""
+        assert self._oidc(store_backend="file").jwt_signing_key is None
+
+    def test_external_backend_requires_a_signing_key(self):
+        """Without one, the store's encryption key follows the upstream client
+        secret, and the next rotation would make the shared store unreadable."""
+        with pytest.raises(ValueError, match="requires jwt_signing_key") as excinfo:
+            self._oidc(store_backend="dynamodb", store_dynamodb_table="t")
+        assert "JWT_SIGNING_KEY" in str(excinfo.value)
+
+    def test_dynamodb_requires_a_table(self):
+        with pytest.raises(
+            ValueError, match="requires store_dynamodb_table"
+        ) as excinfo:
+            self._oidc(store_backend="dynamodb", jwt_signing_key="k" * 32)
+        assert "STORE_DYNAMODB_TABLE" in str(excinfo.value)
+
+    def test_dynamodb_happy_path(self):
+        config = self._oidc(
+            store_backend="dynamodb",
+            jwt_signing_key="k" * 32,
+            store_dynamodb_table="oauth-state",
+        )
+        assert config.store_dynamodb_region is None
+
+    def test_store_settings_are_inert_for_keycloak(self):
+        """Keycloak is the authorization server; nothing to sign or store."""
+        config = WebConfig(
+            inbound_auth_provider="keycloak",
+            proxy_base_url="https://mcp.example.com",
+            issuer_url="https://kc.example.com/realms/r",
+            store_backend="dynamodb",
+        )
+        assert config.store_backend == "dynamodb"
+
+
 class TestWebConfigOutbound:
     """Per-mode outbound validation in WebConfig.__post_init__."""
 

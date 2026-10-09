@@ -58,6 +58,15 @@ OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "st
   shape under different upstream vocabularies.
 """
 
+StoreBackend: TypeAlias = Literal["file", "dynamodb"]
+"""Where the OAuth proxy keeps its state in web mode.
+
+- ``file`` -- FastMCP's own encrypted file store under ``${FASTMCP_HOME}``.
+  Durable on a VM disk or a mounted volume, lost with a container filesystem.
+- ``dynamodb`` -- an AWS DynamoDB table, shared by every replica and surviving
+  any restart. Needs the ``dynamodb`` extra.
+"""
+
 
 @dataclass
 class DesktopConfig:
@@ -141,6 +150,28 @@ class WebConfig:
         azure_identifier_uri: Azure Application ID URI used for scope
             prefixing. Optional for ``azure``.
 
+    OAuth proxy state (``oidc`` / ``aws-cognito`` / ``google`` / ``azure``;
+    inert for ``keycloak``, where Keycloak is the authorization server and the
+    proxy keeps no OAuth state):
+        jwt_signing_key: Secret the proxy signs the tokens it issues to MCP
+            clients with, and from which the store's encryption key is
+            derived. Unset, FastMCP derives both from ``client_secret``, so a
+            rotation of the upstream client secret invalidates every issued
+            token and makes the stored state unreadable. Required with any
+            ``store_backend`` other than ``file``.
+        store_backend: Where the proxy keeps client registrations, the upstream
+            IdP's tokens and the mapping from its own tokens to them. See
+            :data:`StoreBackend`.
+        store_dynamodb_table: DynamoDB table name -- required for
+            ``store_backend='dynamodb'``.
+        store_dynamodb_region: AWS region of the table. Optional; unset, the
+            AWS SDK's default resolution (``AWS_REGION``, profile, instance
+            metadata) applies.
+        store_dynamodb_auto_create: Create the table at startup when it is
+            missing. Off by default, so the proxy needs no
+            ``dynamodb:CreateTable`` permission and a missing table fails at
+            startup instead of being created with defaults nobody chose.
+
     Outbound (proxy -> upstream MCP server):
         outbound_auth: Outbound auth mechanism.
         outbound_client_id: OAuth client ID -- required for
@@ -194,6 +225,13 @@ class WebConfig:
     azure_tenant_id: str | None = None
     azure_identifier_uri: str | None = None
 
+    # OAuth proxy state
+    jwt_signing_key: str | None = None
+    store_backend: StoreBackend = "file"
+    store_dynamodb_table: str | None = None
+    store_dynamodb_region: str | None = None
+    store_dynamodb_auto_create: bool = False
+
     # outbound
     outbound_auth: OutboundAuthMode = "forward"
     outbound_client_id: str | None = None
@@ -211,6 +249,7 @@ class WebConfig:
     def __post_init__(self) -> None:
         self._validate_base_urls()
         self._validate_inbound()
+        self._validate_store()
         self._validate_outbound()
 
     @property
@@ -277,6 +316,33 @@ class WebConfig:
             if not self.scopes:
                 # AzureProvider's required_scopes is a mandatory list[str].
                 raise ValueError("inbound_auth_provider='azure' requires scopes")
+
+    def _validate_store(self) -> None:
+        """Refuse a store backend the proxy could not keep readable.
+
+        Skipped for ``keycloak``, where the settings are inert, and for the
+        default ``file`` store, where startup stays exactly as it was.
+
+        The signing key is mandatory with any other backend because without it
+        FastMCP derives the store's encryption key from the upstream client
+        secret: the first rotation of that secret would silently turn a store
+        shared by every replica into undecryptable data and sign every user out.
+        Failing here surfaces that at the first deployment instead.
+        """
+        if self.inbound_auth_provider == "keycloak" or self.store_backend == "file":
+            return
+        if not self.jwt_signing_key:
+            raise ValueError(
+                f"store_backend={self.store_backend!r} requires jwt_signing_key "
+                "(JWT_SIGNING_KEY / --jwt-signing-key): without it the store's "
+                "encryption key is derived from the upstream client secret, and "
+                "rotating that secret would make the stored state unreadable"
+            )
+        if self.store_backend == "dynamodb" and not self.store_dynamodb_table:
+            raise ValueError(
+                "store_backend='dynamodb' requires store_dynamodb_table "
+                "(STORE_DYNAMODB_TABLE / --store-dynamodb-table)"
+            )
 
     def _validate_outbound(self) -> None:
         if self.outbound_auth == "oauth-client-credentials":
