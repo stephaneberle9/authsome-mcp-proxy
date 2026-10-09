@@ -167,11 +167,31 @@ async def running(app):
 
 
 @pytest.mark.asyncio
-async def test_every_host_serves_a_live_mcp_session():
+async def test_every_host_serves_a_live_mcp_session_over_one_server_lifespan():
     """Each child app must have its own started session manager, on every
     hostname -- not just the canonical one whose lifespan might have run by
-    accident."""
-    server = FastMCP(name="test-proxy")
+    accident -- while the server behind them runs its lifespan exactly once.
+
+    The nesting mirrors ``_serve_http``: the server's private, reference-counted
+    ``_lifespan_manager`` is held open around the router, and every child's
+    session manager enters it again on startup. That private API is the one
+    thing web mode borrows from fastmcp without a compatibility promise, so
+    this test is where its loss must surface: an ``AttributeError`` if the
+    method disappears, and a lifespan entered once per hostname -- or torn
+    down when the router stops, while the server is still being served -- if
+    it stops counting.
+    """
+    lifespan_events: list[str] = []
+
+    @asynccontextmanager
+    async def counted_lifespan(_server):
+        lifespan_events.append("enter")
+        try:
+            yield {}
+        finally:
+            lifespan_events.append("exit")
+
+    server = FastMCP(name="test-proxy", lifespan=counted_lifespan)
 
     @server.tool()
     def ping() -> str:
@@ -185,30 +205,39 @@ async def test_every_host_serves_a_live_mcp_session():
     }
     router = HostRouter(apps, canonical_base_url=PRIMARY)
 
-    async with running(router):
-        for host in ("mcp.example.io", "mcp.example.com"):
-            async with httpx2.AsyncClient(
-                transport=httpx2.ASGITransport(app=router),
-                base_url="http://testserver",
-            ) as client:
-                response = await client.post(
-                    "/mcp",
-                    headers={
-                        "Host": host,
-                        "Accept": "application/json, text/event-stream",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "jsonrpc": "2.0",
-                        "id": 1,
-                        "method": "initialize",
-                        "params": {
-                            "protocolVersion": "2025-06-18",
-                            "capabilities": {},
-                            "clientInfo": {"name": "test", "version": "1"},
-                        },
-                    },
-                )
+    async with server._lifespan_manager():
+        async with running(router):
+            await _initialize_on_every_host(router)
+            assert lifespan_events == ["enter"], "server lifespan ran per hostname"
+        assert lifespan_events == ["enter"], "router shutdown ended the lifespan"
+    assert lifespan_events == ["enter", "exit"]
 
-            assert response.status_code == 200, (host, response.text)
-            assert response.headers.get("mcp-session-id"), host
+
+async def _initialize_on_every_host(router):
+    """Open an MCP session on each hostname, failing on the first that cannot."""
+    for host in ("mcp.example.io", "mcp.example.com"):
+        async with httpx2.AsyncClient(
+            transport=httpx2.ASGITransport(app=router),
+            base_url="http://testserver",
+        ) as client:
+            response = await client.post(
+                "/mcp",
+                headers={
+                    "Host": host,
+                    "Accept": "application/json, text/event-stream",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "method": "initialize",
+                    "params": {
+                        "protocolVersion": "2025-06-18",
+                        "capabilities": {},
+                        "clientInfo": {"name": "test", "version": "1"},
+                    },
+                },
+            )
+
+        assert response.status_code == 200, (host, response.text)
+        assert response.headers.get("mcp-session-id"), host
