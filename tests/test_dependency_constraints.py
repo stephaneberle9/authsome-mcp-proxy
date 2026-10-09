@@ -61,6 +61,21 @@ class TestPublishedDependencyConstraints:
         specifier = _constraint("fastmcp").specifier
         assert not specifier.contains("4.0.7")
 
+    def test_fastmcp_5_is_excluded(self):
+        """Web mode depends on fastmcp's private ``_lifespan_manager``.
+
+        One FastMCP server backs an ASGI app per public hostname, and the
+        server's lifespan is shared between them only because
+        ``_lifespan_manager`` is reference-counted. A private method carries no
+        compatibility promise, and ``uvx`` resolves the newest fastmcp at
+        install time, so a major that renames it or drops the counting must be
+        unresolvable rather than break web mode at startup -- or, worse, run
+        the server lifespan once per hostname.
+        """
+        specifier = _constraint("fastmcp").specifier
+        assert not specifier.contains("5.0.0")
+        assert specifier.contains("4.1.0")
+
     def test_legacy_httpx_is_not_declared(self):
         """Nothing here imports ``httpx`` any more; ``httpx2`` replaces it."""
         declared = {Requirement(r).name for r in requires("authsome-mcp-proxy") or []}
