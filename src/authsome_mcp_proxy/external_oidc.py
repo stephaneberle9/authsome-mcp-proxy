@@ -318,15 +318,17 @@ class ExternalOIDCAuth(httpx2.Auth):
         # reference value of the RFC 9207 `iss` check on the callback, so
         # without this check that security check would be anchored to whatever
         # the discovery response claims rather than to the configuration.
-        # Exact string comparison, without normalization, is what "identical"
-        # means and matches the `iss` check: a trailing slash on one side only
-        # is a mismatch, and the error names both values so the user can fix
-        # the configured URL. `issuer_url` is the value as configured: only the
-        # discovery URL above strips its trailing slash, `issuer_url` itself is
-        # never normalized. `oidc_config.issuer` is the literal string the
-        # provider published, since fastmcp's model prefers `str` over
-        # `AnyHttpUrl` for a string input and so never adds a trailing slash.
-        if oidc_config.issuer != issuer_url:
+        # The comparison is exact except for a trailing slash on either side.
+        # The discovery URL above strips that slash, so both spellings fetch
+        # the same document, and tolerating it anchors the `issuer` no less
+        # while keeping configurations working that copied the issuer URL with
+        # or without the slash the provider publishes. Any other difference is
+        # a mismatch, and the error names both values. `oidc_config.issuer` is
+        # the literal string the provider published, since fastmcp's model
+        # prefers `str` over `AnyHttpUrl` for a string input and so never adds
+        # a trailing slash; the `iss` check compares against it exactly. The
+        # `str(...)` matches that check and only narrows the declared type.
+        if str(oidc_config.issuer).rstrip("/") != issuer_url.rstrip("/"):
             raise ValueError(
                 f"OIDC configuration issuer {oidc_config.issuer} does not match "
                 f"the configured issuer URL {issuer_url}"
@@ -441,7 +443,7 @@ class ExternalOIDCAuth(httpx2.Auth):
         # RFC 9207, section 2.4 prescribes comparing against the issuer
         # identifier of the authorization server the request was sent to. That
         # is the discovery document's `issuer`, which `__init__` has checked to
-        # be identical to the configured issuer URL; mcp's OAuth client
+        # match the configured issuer URL; mcp's OAuth client
         # compares against the metadata issuer too. Plain string comparison,
         # without URL normalization, is what section 2.4 requires.
         expected_iss = str(self.context.oidc_config.issuer)

@@ -309,7 +309,7 @@ class TestExternalOIDCAuth:
 
 class TestDiscoveryIssuerValidation:
     """Test that the discovery document's `issuer` must equal the configured
-    issuer URL.
+    issuer URL, up to a trailing slash on either side.
 
     The document's `issuer` is the reference value of the RFC 9207 `iss` check
     on the authorization callback, so it must be anchored to the
@@ -377,32 +377,36 @@ class TestDiscoveryIssuerValidation:
             f"the configured issuer URL {issuer}"
         )
 
-    def test_trailing_slash_on_configured_issuer_url_only_is_rejected(self, tmp_path):
-        """OpenID Connect Discovery 1.0, section 4.3 requires the two values to
-        be identical, so a trailing slash on the configured issuer URL only is a
-        mismatch, not normalized away; the error names both values so the user
-        can correct the configured URL."""
+    def test_trailing_slash_on_configured_issuer_url_only_is_accepted(self, tmp_path):
+        """A trailing slash on the configured issuer URL only is tolerated: the
+        discovery URL strips it, so the document still comes from the
+        configured issuer. The `iss` check keeps the published value."""
+        issuer = self._unique_issuer()
+
+        auth = self._make_auth(tmp_path, f"{issuer}/", issuer)
+
+        assert auth.context.oidc_config.issuer == issuer
+
+    def test_trailing_slash_on_published_issuer_only_is_accepted(self, tmp_path):
+        """A trailing slash on the published `issuer` only is tolerated too, as
+        Auth0 publishes its issuer with one and configurations often omit it.
+        The `iss` check keeps the published value, slash included."""
+        issuer = self._unique_issuer()
+
+        auth = self._make_auth(tmp_path, issuer, f"{issuer}/")
+
+        assert auth.context.oidc_config.issuer == f"{issuer}/"
+
+    def test_other_path_differences_are_rejected(self, tmp_path):
+        """Only a trailing slash is tolerated: a published `issuer` that differs
+        in anything else, such as an extra path segment, is a mismatch."""
         issuer = self._unique_issuer()
 
         with pytest.raises(ValueError) as excinfo:
-            self._make_auth(tmp_path, f"{issuer}/", issuer)
+            self._make_auth(tmp_path, issuer, f"{issuer}/other")
 
         assert str(excinfo.value) == (
-            f"OIDC configuration issuer {issuer} does not match "
-            f"the configured issuer URL {issuer}/"
-        )
-
-    def test_trailing_slash_on_published_issuer_only_is_rejected(self, tmp_path):
-        """OpenID Connect Discovery 1.0, section 4.3 requires the two values to
-        be identical, so a trailing slash on the published `issuer` only is a
-        mismatch too; the configured URL must then carry the slash as well."""
-        issuer = self._unique_issuer()
-
-        with pytest.raises(ValueError) as excinfo:
-            self._make_auth(tmp_path, issuer, f"{issuer}/")
-
-        assert str(excinfo.value) == (
-            f"OIDC configuration issuer {issuer}/ does not match "
+            f"OIDC configuration issuer {issuer}/other does not match "
             f"the configured issuer URL {issuer}"
         )
 
