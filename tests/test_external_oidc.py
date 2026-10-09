@@ -1,6 +1,7 @@
 """Tests for authsome_mcp_proxy.external_oidc module."""
 
 import logging
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
@@ -306,6 +307,110 @@ class TestExternalOIDCAuth:
             ExternalOIDCAuth(issuer_url="https://auth.example.com", client_id="")
 
 
+class TestDiscoveryIssuerValidation:
+    """Test that the discovery document's `issuer` must equal the configured
+    issuer URL, up to a trailing slash on either side.
+
+    The document's `issuer` is the reference value of the RFC 9207 `iss` check
+    on the authorization callback, so it must be anchored to the
+    configuration rather than taken on the discovery response's word.
+    """
+
+    @staticmethod
+    def _make_auth(
+        tmp_path: Path, configured_issuer_url: str, published_issuer: str
+    ) -> ExternalOIDCAuth:
+        """Construct the auth against a discovery response publishing
+        `published_issuer`.
+
+        The response goes through fastmcp's real discovery parsing, so the
+        tests also pin that the published `issuer` is compared as the literal
+        string, not as a URL normalized by pydantic.
+        """
+        response = Mock()
+        response.json.return_value = {
+            "issuer": published_issuer,
+            "authorization_endpoint": f"{published_issuer.rstrip('/')}/authorize",
+            "token_endpoint": f"{published_issuer.rstrip('/')}/token",
+            "jwks_uri": f"{published_issuer.rstrip('/')}/certs",
+            "response_types_supported": ["code"],
+            "subject_types_supported": ["public"],
+            "id_token_signing_alg_values_supported": ["RS256"],
+        }
+        with (
+            patch("authsome_mcp_proxy.external_oidc._setup_token_refresh_logging"),
+            patch("authsome_mcp_proxy.external_oidc.httpx2.get", return_value=response),
+        ):
+            return ExternalOIDCAuth(
+                issuer_url=configured_issuer_url,
+                client_id="test-client",
+                token_storage_cache_dir=tmp_path / "cache",
+            )
+
+    @staticmethod
+    def _unique_issuer() -> str:
+        # fastmcp caches discovery documents by discovery URL, which is the
+        # same with and without a trailing slash on the issuer URL; a host of
+        # its own keeps every test from being served another test's document.
+        return f"https://{uuid.uuid4().hex}.example.com/realms/test"
+
+    def test_matching_issuer_is_accepted(self, tmp_path):
+        """A document whose `issuer` is identical to the configured issuer URL
+        may be used (OpenID Connect Discovery 1.0, section 4.3)."""
+        issuer = self._unique_issuer()
+
+        auth = self._make_auth(tmp_path, issuer, issuer)
+
+        assert auth.context.oidc_config.issuer == issuer
+
+    def test_mismatching_issuer_is_rejected(self, tmp_path):
+        """A document naming another issuer must not be used (OpenID Connect
+        Discovery 1.0, section 4.3); otherwise the `iss` check on the callback
+        would compare against an issuer the configuration never named."""
+        issuer = self._unique_issuer()
+
+        with pytest.raises(ValueError) as excinfo:
+            self._make_auth(tmp_path, issuer, ATTACKER_ISSUER)
+
+        assert str(excinfo.value) == (
+            f"OIDC configuration issuer {ATTACKER_ISSUER} does not match "
+            f"the configured issuer URL {issuer}"
+        )
+
+    def test_trailing_slash_on_configured_issuer_url_only_is_accepted(self, tmp_path):
+        """A trailing slash on the configured issuer URL only is tolerated: the
+        discovery URL strips it, so the document still comes from the
+        configured issuer. The `iss` check keeps the published value."""
+        issuer = self._unique_issuer()
+
+        auth = self._make_auth(tmp_path, f"{issuer}/", issuer)
+
+        assert auth.context.oidc_config.issuer == issuer
+
+    def test_trailing_slash_on_published_issuer_only_is_accepted(self, tmp_path):
+        """A trailing slash on the published `issuer` only is tolerated too, as
+        Auth0 publishes its issuer with one and configurations often omit it.
+        The `iss` check keeps the published value, slash included."""
+        issuer = self._unique_issuer()
+
+        auth = self._make_auth(tmp_path, issuer, f"{issuer}/")
+
+        assert auth.context.oidc_config.issuer == f"{issuer}/"
+
+    def test_other_path_differences_are_rejected(self, tmp_path):
+        """Only a trailing slash is tolerated: a published `issuer` that differs
+        in anything else, such as an extra path segment, is a mismatch."""
+        issuer = self._unique_issuer()
+
+        with pytest.raises(ValueError) as excinfo:
+            self._make_auth(tmp_path, issuer, f"{issuer}/other")
+
+        assert str(excinfo.value) == (
+            f"OIDC configuration issuer {issuer}/other does not match "
+            f"the configured issuer URL {issuer}"
+        )
+
+
 class TestTokenRefreshLogging:
     """Test token refresh logging setup and functionality."""
 
@@ -468,6 +573,7 @@ class TestTokenRefreshLogging:
         ):
             # Mock the OIDC config response
             mock_oidc_config = Mock()
+            mock_oidc_config.issuer = "https://auth.example.com"
             mock_oidc_config.authorization_endpoint = (
                 "https://auth.example.com/authorize"
             )
@@ -502,6 +608,7 @@ class TestTokenRefresh:
         # Create a mock OIDC context with existing tokens
         mock_storage = AsyncMock()
         mock_oidc_config = Mock()
+        mock_oidc_config.issuer = "https://auth.example.com"
         mock_oidc_config.token_endpoint = "https://auth.example.com/token"
 
         context = OIDCContext(
@@ -572,6 +679,7 @@ class TestTokenRefresh:
         # Create a mock OIDC context with existing tokens
         mock_storage = AsyncMock()
         mock_oidc_config = Mock()
+        mock_oidc_config.issuer = "https://auth.example.com"
         mock_oidc_config.token_endpoint = "https://auth.example.com/token"
 
         context = OIDCContext(
@@ -642,6 +750,7 @@ class TestTokenRefresh:
         # Create a mock OIDC context
         mock_storage = AsyncMock()
         mock_oidc_config = Mock()
+        mock_oidc_config.issuer = "https://auth.example.com"
         mock_oidc_config.token_endpoint = "https://auth.example.com/token"
 
         context = OIDCContext(
@@ -706,6 +815,7 @@ class TestTokenRefresh:
         # Create a mock OIDC context without tokens
         mock_storage = AsyncMock()
         mock_oidc_config = Mock()
+        mock_oidc_config.issuer = "https://auth.example.com"
         mock_oidc_config.token_endpoint = "https://auth.example.com/token"
 
         context = OIDCContext(
@@ -738,11 +848,6 @@ class TestTokenRefresh:
 
 
 ISSUER = "https://auth.example.com/realms/test"
-# The configured issuer URL deliberately differs from the discovery document's
-# `issuer` by a trailing slash, so the tests also pin which of the two `iss` is
-# compared against: RFC 9207 prescribes the authorization server's own issuer
-# identifier, i.e. the discovery value.
-CONFIGURED_ISSUER_URL = f"{ISSUER}/"
 ATTACKER_ISSUER = "https://attacker.example.com"
 
 
@@ -771,7 +876,7 @@ class TestIssValidation:
             ),
         ):
             auth = ExternalOIDCAuth(
-                issuer_url=CONFIGURED_ISSUER_URL,
+                issuer_url=ISSUER,
                 client_id="test-client",
                 token_storage_cache_dir=tmp_path / "cache",
             )
@@ -863,13 +968,13 @@ class TestIssValidation:
         token_post.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_configured_issuer_url_is_not_the_expected_iss(self, tmp_path):
+    async def test_iss_with_added_trailing_slash_is_rejected(self, tmp_path):
         """`iss` is compared with the discovery `issuer` by plain string
-        comparison (RFC 9207, section 2.4), so the configured issuer URL, which
-        differs by a trailing slash, does not match."""
+        comparison (RFC 9207, section 2.4), so an `iss` that differs only by a
+        trailing slash does not match."""
         auth = self._make_auth(tmp_path, True)
 
-        error, token_post = await self._run_flow(auth, CONFIGURED_ISSUER_URL)
+        error, token_post = await self._run_flow(auth, f"{ISSUER}/")
 
         assert error is not None
         assert str(error).startswith("OAuth iss mismatch")

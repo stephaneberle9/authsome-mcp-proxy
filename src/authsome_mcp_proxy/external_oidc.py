@@ -312,6 +312,28 @@ class ExternalOIDCAuth(httpx2.Auth):
         if not oidc_config.token_endpoint:
             raise ValueError("OIDC configuration missing token_endpoint")
 
+        # OpenID Connect Discovery 1.0, section 4.3 (and RFC 8414, section 3.3)
+        # forbids using a discovery document whose `issuer` is not identical to
+        # the issuer URL it was fetched for. The document's `issuer` is the
+        # reference value of the RFC 9207 `iss` check on the callback, so
+        # without this check that security check would be anchored to whatever
+        # the discovery response claims rather than to the configuration.
+        # The comparison is exact except for a trailing slash on either side.
+        # The discovery URL above strips that slash, so both spellings fetch
+        # the same document, and tolerating it anchors the `issuer` no less
+        # while keeping configurations working that copied the issuer URL with
+        # or without the slash the provider publishes. Any other difference is
+        # a mismatch, and the error names both values. `oidc_config.issuer` is
+        # the literal string the provider published, since fastmcp's model
+        # prefers `str` over `AnyHttpUrl` for a string input and so never adds
+        # a trailing slash; the `iss` check compares against it exactly. The
+        # `str(...)` matches that check and only narrows the declared type.
+        if str(oidc_config.issuer).rstrip("/") != issuer_url.rstrip("/"):
+            raise ValueError(
+                f"OIDC configuration issuer {oidc_config.issuer} does not match "
+                f"the configured issuer URL {issuer_url}"
+            )
+
         # Create context with all configuration and state
         self.context = OIDCContext(
             issuer_url=issuer_url,
@@ -420,11 +442,10 @@ class ExternalOIDCAuth(httpx2.Auth):
         """
         # RFC 9207, section 2.4 prescribes comparing against the issuer
         # identifier of the authorization server the request was sent to. That
-        # is the discovery document's `issuer`, not the configured issuer URL:
-        # the two can differ (e.g., by a trailing slash) while the provider
-        # always sends its own identifier, and mcp's OAuth client compares
-        # against the metadata issuer too. Plain string comparison, without URL
-        # normalization, is what section 2.4 requires.
+        # is the discovery document's `issuer`, which `__init__` has checked to
+        # match the configured issuer URL; mcp's OAuth client
+        # compares against the metadata issuer too. Plain string comparison,
+        # without URL normalization, is what section 2.4 requires.
         expected_iss = str(self.context.oidc_config.issuer)
 
         if returned_iss is not None:
