@@ -35,6 +35,27 @@ if TYPE_CHECKING:
     from .config import WebConfig
 
 
+def _strip_inbound_credentials(request: httpx2.Request) -> None:
+    """Remove the downstream client's credentials from an outbound request.
+
+    The proxy that ``create_proxy`` builds runs its upstream client with
+    fastmcp's ``forward_incoming_headers`` transport option, which copies the
+    inbound request's headers -- ``Authorization`` explicitly included -- onto
+    every upstream request before this auth flow runs. Those credentials were
+    issued for the proxy, not for the upstream. fastmcp offers no supported
+    switch to turn the forwarding off for the proxy's client, so they are
+    removed here, the last point before the request leaves the proxy. Each
+    auth flow then sets the one credential the upstream should see.
+
+    ``Cookie`` is removed even though fastmcp's forwarding currently withholds
+    it: the leak would be the same in every outbound mode if it ever did not.
+    httpx2's ``Headers`` matches names case-insensitively, so one ``pop``
+    catches every spelling.
+    """
+    request.headers.pop("Authorization", None)
+    request.headers.pop("Cookie", None)
+
+
 class ForwardSessionTokenAuth(httpx2.Auth):
     """Forward the downstream session's bearer token to the upstream MCP.
 
@@ -63,6 +84,7 @@ class ForwardSessionTokenAuth(httpx2.Auth):
                 "The inbound request must be authenticated before the proxy can forward "
                 "the user's token to the upstream MCP server."
             )
+        _strip_inbound_credentials(request)
         request.headers["Authorization"] = f"Bearer {token.token}"
         yield request
 
@@ -87,6 +109,7 @@ class StaticHeaderAuth(httpx2.Auth):
     def auth_flow(
         self, request: httpx2.Request
     ) -> Generator[httpx2.Request, httpx2.Response]:
+        _strip_inbound_credentials(request)
         request.headers[self.header_name] = self.header_value
         yield request
 
@@ -128,6 +151,7 @@ class OAuthClientCredentialsAuth(httpx2.Auth):
         self, request: httpx2.Request
     ) -> AsyncGenerator[httpx2.Request, httpx2.Response]:
         token = await self._get_token()
+        _strip_inbound_credentials(request)
         request.headers["Authorization"] = f"Bearer {token}"
         yield request
 
