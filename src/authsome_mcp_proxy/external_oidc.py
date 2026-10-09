@@ -79,6 +79,20 @@ HTTPX_REQUEST_TIMEOUT_SECONDS = 5
 BROWSER_LOGIN_TIMEOUT_SECONDS = 30
 
 
+class _ExternalOIDCConfiguration(OIDCConfiguration):
+    """fastmcp's discovery model, extended with the RFC 9207 metadata flag.
+
+    fastmcp's `OIDCConfiguration` ignores undeclared fields, so without this
+    declaration the provider's `authorization_response_iss_parameter_supported`
+    would be dropped during parsing and the callback could never require `iss`.
+    Subclassing keeps fastmcp's fetching, strict validation and caching, which
+    `get_oidc_configuration` applies to whichever class it is called on.
+    """
+
+    # RFC 9207, section 3: advertises that every authorization response carries `iss`
+    authorization_response_iss_parameter_supported: bool | None = None
+
+
 @dataclass
 class OIDCContext:
     """OIDC OAuth flow context - similar to OAuthContext but for external OIDC providers."""
@@ -91,7 +105,7 @@ class OIDCContext:
     storage: TokenStorage
 
     # Discovered metadata
-    oidc_config: OIDCConfiguration
+    oidc_config: _ExternalOIDCConfiguration
 
     # Token management
     current_tokens: OAuthToken | None = None
@@ -286,7 +300,7 @@ class ExternalOIDCAuth(httpx2.Auth):
 
         # Fetch OIDC configuration
         config_url = f"{issuer_url.rstrip('/')}/.well-known/openid-configuration"
-        oidc_config = OIDCConfiguration.get_oidc_configuration(
+        oidc_config = _ExternalOIDCConfiguration.get_oidc_configuration(
             AnyHttpUrl(config_url),
             strict=True,
             timeout_seconds=HTTPX_REQUEST_TIMEOUT_SECONDS,
@@ -333,8 +347,12 @@ class ExternalOIDCAuth(httpx2.Auth):
         )
         self._initialized = True
 
-    async def _run_callback_server(self) -> tuple[str, str]:
-        """Handle OAuth callback and return (auth_code, state)."""
+    async def _run_callback_server(self) -> tuple[str, str, str | None]:
+        """Handle OAuth callback and return (auth_code, state, iss).
+
+        `iss` is the RFC 9207 issuer identifier, or None when the provider did
+        not send one.
+        """
         # Create result container and event for async coordination
         result_container = OAuthCallbackResult()
         result_ready = anyio.Event()
@@ -369,8 +387,11 @@ class ExternalOIDCAuth(httpx2.Auth):
                             "OAuth callback did not return code or state"
                         )
 
-                    # Return code and state
-                    return result_container.code, result_container.state
+                    return (
+                        result_container.code,
+                        result_container.state,
+                        result_container.iss,
+                    )
             except TimeoutError:
                 raise TimeoutError(
                     f"OIDC Auth callback timed out after {BROWSER_LOGIN_TIMEOUT_SECONDS} seconds, "
@@ -382,6 +403,44 @@ class ExternalOIDCAuth(httpx2.Auth):
                 tg.cancel_scope.cancel()
 
         raise RuntimeError("OIDC Auth callback handler could not be started")
+
+    def _validate_iss(self, returned_iss: str | None) -> None:
+        """Validate the RFC 9207 `iss` parameter of the authorization callback.
+
+        Defends against the mix-up attack: an attacker who gets the client to
+        start a flow at one authorization server can make the authorization code
+        of another server arrive at this callback, and the client would then
+        redeem it at the wrong token endpoint. The authorization server names
+        itself in `iss`, so a callback from any other server is rejected here,
+        before the code reaches the token endpoint.
+
+        Raises:
+            RuntimeError: If `iss` does not match the provider's issuer, or is
+                absent although the provider advertised that it always sends it.
+        """
+        # RFC 9207, section 2.4 prescribes comparing against the issuer
+        # identifier of the authorization server the request was sent to. That
+        # is the discovery document's `issuer`, not the configured issuer URL:
+        # the two can differ (e.g., by a trailing slash) while the provider
+        # always sends its own identifier, and mcp's OAuth client compares
+        # against the metadata issuer too. Plain string comparison, without URL
+        # normalization, is what section 2.4 requires.
+        expected_iss = str(self.context.oidc_config.issuer)
+
+        if returned_iss is not None:
+            if returned_iss != expected_iss:
+                raise RuntimeError(
+                    f"OAuth iss mismatch: {returned_iss} != {expected_iss} - possible mix-up attack"
+                )
+            return
+
+        # A provider that does not advertise support may legitimately omit
+        # `iss`; one that does advertise it always sends it, so its absence
+        # means the callback did not come from that provider.
+        if self.context.oidc_config.authorization_response_iss_parameter_supported:
+            raise RuntimeError(
+                f"OAuth iss missing: expected {expected_iss} - possible mix-up attack"
+            )
 
     async def _perform_auth_flow(self) -> OAuthToken:
         """Perform the OAuth authorization code flow with PKCE."""
@@ -398,7 +457,7 @@ class ExternalOIDCAuth(httpx2.Auth):
             webbrowser.open(authorization_url)
 
             # Wait for callback
-            auth_code, returned_state = await self._run_callback_server()
+            auth_code, returned_state, returned_iss = await self._run_callback_server()
 
             # Validate state
             if returned_state is None or not secrets.compare_digest(
@@ -407,6 +466,8 @@ class ExternalOIDCAuth(httpx2.Auth):
                 raise RuntimeError(
                     f"OAuth state mismatch: {returned_state} != {state} - possible CSRF attack"
                 )
+
+            self._validate_iss(returned_iss)
 
             # Validate auth code
             if not auth_code:
