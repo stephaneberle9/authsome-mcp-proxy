@@ -197,7 +197,7 @@ class WebConfig:
         operator hard-code what downstream clients should see. Each maps
         directly to the matching ``create_proxy()`` kwarg.
 
-        proxy_name: Display name (e.g. ``"ANALYZE"``). Without this, the
+        proxy_name: Display name (e.g. ``"Acme Analytics"``). Without this, the
             proxy falls back to FastMCP's auto-generated ``FastMCPProxy-xxxx``.
         proxy_version: Display version string.
         proxy_instructions: Instructions the LLM sees alongside the

@@ -326,7 +326,7 @@ def cli() -> argparse.Namespace:
     parser.add_argument(
         "--proxy-name",
         default=None,
-        help="Display name advertised to downstream MCP clients (e.g. 'ANALYZE'). "
+        help="Display name advertised to downstream MCP clients (e.g. 'Acme Analytics'). "
         "Without this, FastMCP auto-generates 'FastMCPProxy-xxxx'. "
         "Can also be set via MCP_PROXY_NAME env var.",
     )

@@ -135,7 +135,7 @@ async def test_relay_falls_back_to_the_handshake_when_discover_has_no_name():
     modern = _connected_client(None, "modern instructions")
     legacy = _connected_client(
         SimpleNamespace(
-            name="secure-repository-mcp",
+            name="acme-repository-mcp",
             version="1.0.0",
             website_url=None,
             icons=None,
@@ -152,7 +152,7 @@ async def test_relay_falls_back_to_the_handshake_when_discover_has_no_name():
 
     assert mock_client_cls.call_args_list[1].kwargs["mode"] == "legacy"
     assert relayed == {
-        "name": "secure-repository-mcp",
+        "name": "acme-repository-mcp",
         "version": "1.0.0",
         "instructions": "modern instructions",
     }
@@ -254,10 +254,10 @@ async def test_run_async_web_forwards_server_identity_kwargs():
         inbound_auth_provider="keycloak",
         proxy_base_url="https://mcp.example.com",
         issuer_url="https://kc.example.com/realms/r",
-        proxy_name="ANALYZE",
+        proxy_name="Acme Analytics",
         proxy_version="2.3.0",
         proxy_instructions="Use these tools for traceability analysis.",
-        proxy_website_url="https://analyze.example.com",
+        proxy_website_url="https://analytics.example.com",
     )
 
     with (
@@ -274,10 +274,10 @@ async def test_run_async_web_forwards_server_identity_kwargs():
         await mcp_proxy.run_async("http://upstream:8080", web_config, show_banner=False)
 
         cp_kwargs = mock_create_proxy.call_args.kwargs
-        assert cp_kwargs["name"] == "ANALYZE"
+        assert cp_kwargs["name"] == "Acme Analytics"
         assert cp_kwargs["version"] == "2.3.0"
         assert cp_kwargs["instructions"] == "Use these tools for traceability analysis."
-        assert cp_kwargs["website_url"] == "https://analyze.example.com"
+        assert cp_kwargs["website_url"] == "https://analytics.example.com"
 
 
 @pytest.mark.asyncio
@@ -287,7 +287,7 @@ async def test_run_async_web_omits_unset_server_identity_kwargs():
         inbound_auth_provider="keycloak",
         proxy_base_url="https://mcp.example.com",
         issuer_url="https://kc.example.com/realms/r",
-        proxy_name="ANALYZE",  # only this one set
+        proxy_name="Acme Analytics",  # only this one set
     )
 
     with (
@@ -304,7 +304,7 @@ async def test_run_async_web_omits_unset_server_identity_kwargs():
         await mcp_proxy.run_async("http://upstream:8080", web_config, show_banner=False)
 
         cp_kwargs = mock_create_proxy.call_args.kwargs
-        assert cp_kwargs["name"] == "ANALYZE"
+        assert cp_kwargs["name"] == "Acme Analytics"
         assert "version" not in cp_kwargs
         assert "instructions" not in cp_kwargs
         assert "website_url" not in cp_kwargs

@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
 #
 # Multi-stage build for `authsome-mcp-proxy`. The image is intended primarily
-# for the **web connector** deployment (k8s in front of ANALYZE / SECURE /
-# similar token-validating MCP servers), so the production stage defaults to
+# for the **web connector** deployment (k8s in front of token-validating
+# upstream MCP servers), so the production stage defaults to
 # `--transport http` bound to `0.0.0.0:8000` and exposes port 8000.
 # Operators can override any of those via container env vars (k8s deployment
 # manifest, `docker run -e ...`, etc.).

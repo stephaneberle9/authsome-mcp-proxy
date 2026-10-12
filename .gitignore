@@ -31,3 +31,6 @@ htmlcov/
 
 # Claude Code local settings (tool permissions, personal overrides — not shared)
 .claude/settings.local.json
+
+# Maintainer triage/dispatch working files (local only, never published)
+.triage/

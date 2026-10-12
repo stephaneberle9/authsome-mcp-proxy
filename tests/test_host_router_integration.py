@@ -31,7 +31,7 @@ def _auth(base_url: str) -> InMemoryOAuthProvider:
     The identity plumbing under test -- protected-resource metadata,
     authorization-server metadata, the challenge on a protected route -- lives
     in the ``OAuthProvider`` base class, so this exercises the same code path as
-    the Cognito provider the ANALYZE deployment uses, without a live user pool.
+    the Cognito provider a production deployment uses, without a live user pool.
     """
     return InMemoryOAuthProvider(base_url=base_url)
 

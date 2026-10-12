@@ -774,7 +774,7 @@ All options can be set via CLI flags or matching environment variables
 
 | Env var | CLI flag | Description |
 |---|---|---|
-| `MCP_PROXY_NAME` | `--proxy-name` | Display name (e.g. `"itemis ANALYZE"`). |
+| `MCP_PROXY_NAME` | `--proxy-name` | Display name (e.g. `"Acme Analytics"`). |
 | `MCP_PROXY_VERSION` | `--proxy-version` | Display version. |
 | `MCP_PROXY_INSTRUCTIONS` | `--proxy-instructions` | Tool-selection hints for the LLM. |
 | `MCP_PROXY_WEBSITE_URL` | `--proxy-website-url` | Project URL shown in client UIs. |

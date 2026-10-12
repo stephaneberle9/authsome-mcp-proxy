@@ -425,38 +425,38 @@ class TestCLIWebModeFlags:
         test_args = [
             "http://upstream",
             "--proxy-name",
-            "ANALYZE",
+            "Acme Analytics",
             "--proxy-version",
             "2.3.0",
             "--proxy-instructions",
             "Use these tools for traceability analysis.",
             "--proxy-website-url",
-            "https://analyze.example.com",
+            "https://analytics.example.com",
         ]
         with patch("sys.argv", ["authsome-mcp-proxy"] + test_args):
             args = cli()
-        assert args.proxy_name == "ANALYZE"
+        assert args.proxy_name == "Acme Analytics"
         assert args.proxy_version == "2.3.0"
         assert args.proxy_instructions == "Use these tools for traceability analysis."
-        assert args.proxy_website_url == "https://analyze.example.com"
+        assert args.proxy_website_url == "https://analytics.example.com"
 
     def test_server_identity_env_vars(self):
         with patch("sys.argv", ["authsome-mcp-proxy", "http://upstream"]):
             with patch.dict(
                 os.environ,
                 {
-                    "MCP_PROXY_NAME": "ANALYZE",
+                    "MCP_PROXY_NAME": "Acme Analytics",
                     "MCP_PROXY_VERSION": "2.3.0",
                     "MCP_PROXY_INSTRUCTIONS": "Env-supplied instructions.",
-                    "MCP_PROXY_WEBSITE_URL": "https://analyze.example.com",
+                    "MCP_PROXY_WEBSITE_URL": "https://analytics.example.com",
                 },
                 clear=True,
             ):
                 args = cli()
-        assert args.proxy_name == "ANALYZE"
+        assert args.proxy_name == "Acme Analytics"
         assert args.proxy_version == "2.3.0"
         assert args.proxy_instructions == "Env-supplied instructions."
-        assert args.proxy_website_url == "https://analyze.example.com"
+        assert args.proxy_website_url == "https://analytics.example.com"
 
     def test_outbound_env_vars(self):
         with patch("sys.argv", ["authsome-mcp-proxy", "http://upstream"]):
@@ -661,21 +661,21 @@ class TestBuildProxyConfig:
                 "--oidc-issuer-url",
                 "https://kc/realms/r",
                 "--proxy-name",
-                "ANALYZE",
+                "Acme Analytics",
                 "--proxy-version",
                 "2.3.0",
                 "--proxy-instructions",
                 "Use these tools for traceability analysis.",
                 "--proxy-website-url",
-                "https://analyze.example.com",
+                "https://analytics.example.com",
             ]
         )
         config = build_proxy_config(args)
         assert isinstance(config, WebConfig)
-        assert config.proxy_name == "ANALYZE"
+        assert config.proxy_name == "Acme Analytics"
         assert config.proxy_version == "2.3.0"
         assert config.proxy_instructions == "Use these tools for traceability analysis."
-        assert config.proxy_website_url == "https://analyze.example.com"
+        assert config.proxy_website_url == "https://analytics.example.com"
 
     def test_http_server_identity_fields_default_to_none(self):
         args = _parse(

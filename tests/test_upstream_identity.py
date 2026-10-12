@@ -62,7 +62,7 @@ PROTOCOL_ERAS = pytest.mark.parametrize("mode", ["auto", "legacy"])
 
 @PROTOCOL_ERAS
 async def test_downstream_sees_the_upstreams_identity(mode):
-    proxy = _proxy(_upstream(), name="itemis ANALYZE MCP", version="1.0.0")
+    proxy = _proxy(_upstream(), name="Acme Analytics MCP", version="1.0.0")
 
     async with Client(proxy, mode=mode) as client:
         info = client.server_info
@@ -70,7 +70,7 @@ async def test_downstream_sees_the_upstreams_identity(mode):
         # Guards the parametrization: each era must take its own code path.
         assert (client.initialize_result is None) == (mode == "auto")
 
-    assert info.name == "itemis ANALYZE MCP"
+    assert info.name == "Acme Analytics MCP"
     assert info.version == "1.0.0"
     assert info.website_url == "https://upstream.example.com"
     assert info.icons == [UPSTREAM_ICON]
@@ -81,7 +81,7 @@ async def test_downstream_sees_the_upstreams_identity(mode):
 async def test_operator_configured_fields_win(mode):
     proxy = _proxy(
         _upstream(),
-        name="itemis ANALYZE MCP",
+        name="Acme Analytics MCP",
         instructions="the operator's instructions",
         website_url="https://operator.example.com",
     )
