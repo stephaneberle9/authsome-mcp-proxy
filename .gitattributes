@@ -1,0 +1,10 @@
+# Store and check out text files as LF on every platform, overriding a local
+# core.autocrlf=true that would otherwise produce phantom EOL-only diffs.
+# text=auto leaves detected binaries untouched; eol=lf pins the *working tree*.
+* text=auto eol=lf
+
+# cmd.exe reads batch files by byte offset, so LF-only endings break labels
+# and goto. Do NOT add *.ps1 here: PowerShell is cross-platform, and CRLF
+# breaks the shebang of a .ps1 meant to run on Linux/macOS.
+*.bat text eol=crlf
+*.cmd text eol=crlf
