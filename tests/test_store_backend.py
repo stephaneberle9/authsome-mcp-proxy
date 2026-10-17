@@ -1,4 +1,10 @@
-"""Tests for the selectable store backend behind the OAuth proxy's state."""
+"""Tests for how the proxy configures and wires the OAuth proxy's state store.
+
+The store itself -- encryption, key derivation, DynamoDB, what survives a
+restart -- is fastmcp-seaworthy's and tested there. What remains here is the
+proxy's part: the CLI and env settings, ``WebConfig.oauth_state``, and handing
+signing key and store to every provider and hostname.
+"""
 
 from __future__ import annotations
 
@@ -11,14 +17,12 @@ from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+from fastmcp_seaworthy import OAuthStateSettings, build_client_storage
 
 from authsome_mcp_proxy import __main__ as cli_main
 from authsome_mcp_proxy import mcp_proxy
 from authsome_mcp_proxy.config import WebConfig
-from authsome_mcp_proxy.inbound_auth import build_client_storage, build_inbound_auth
-
-from .conftest import dynamodb_client
+from authsome_mcp_proxy.inbound_auth import build_inbound_auth
 
 SIGNING_KEY = "a-signing-key-shared-by-every-replica"
 
@@ -44,15 +48,29 @@ def _dynamodb_config(table: str = "oauth-state", **overrides) -> WebConfig:
     )
 
 
-class TestSelection:
+class TestOAuthState:
+    """``WebConfig.oauth_state`` is what reaches fastmcp-seaworthy."""
+
     def test_default_is_fastmcps_file_store(self):
-        """None leaves FastMCP to build its own encrypted file store."""
-        assert build_client_storage(_oidc_config()) is None
+        """No store is built, so FastMCP keeps its own encrypted file store."""
+        settings = _oidc_config().oauth_state
+        assert settings is not None
+        assert settings == OAuthStateSettings()
+        assert build_client_storage(settings) is None
 
-    def test_a_signing_key_alone_keeps_the_file_store(self):
-        assert build_client_storage(_oidc_config(jwt_signing_key=SIGNING_KEY)) is None
+    def test_every_setting_is_carried_over(self):
+        settings = _dynamodb_config(
+            store_dynamodb_region="eu-west-1", store_dynamodb_auto_create=True
+        ).oauth_state
+        assert settings == OAuthStateSettings(
+            jwt_signing_key=SIGNING_KEY,
+            store_backend="dynamodb",
+            store_dynamodb_table="oauth-state",
+            store_dynamodb_region="eu-west-1",
+            store_dynamodb_auto_create=True,
+        )
 
-    def test_keycloak_ignores_the_store_settings(self):
+    def test_keycloak_has_none(self):
         """Keycloak is the authorization server there; the proxy keeps no OAuth
         state, so a selected backend is inert rather than connected to."""
         config = WebConfig(
@@ -61,34 +79,7 @@ class TestSelection:
             issuer_url="https://kc.example.com/realms/r",
             store_backend="dynamodb",
         )
-        assert build_client_storage(config) is None
-
-    def test_dynamodb_is_wrapped_in_fernet_encryption(self):
-        storage = build_client_storage(
-            _dynamodb_config(store_dynamodb_region="eu-west-1")
-        )
-
-        assert storage is not None
-        assert isinstance(storage.store, FernetEncryptionWrapper)
-        assert storage.store.raise_on_decryption_error is False
-        assert storage.backend._table_name == "oauth-state"  # ty: ignore[unresolved-attribute]
-        assert storage.backend._auto_create is False  # ty: ignore[unresolved-attribute]
-        assert "'oauth-state'" in storage.description
-
-    def test_unknown_backend_raises(self):
-        config = _dynamodb_config()
-        config.store_backend = "redis"  # type: ignore[assignment]  # ty: ignore[invalid-assignment]
-        with pytest.raises(ValueError, match="Unknown store_backend 'redis'"):
-            build_client_storage(config)
-
-    def test_missing_extra_names_it(self):
-        """Without the extra the store class cannot be imported; the error says
-        which extra to install rather than surfacing a bare ImportError."""
-        with (
-            patch.dict(sys.modules, {"key_value.aio.stores.dynamodb": None}),
-            pytest.raises(RuntimeError, match=r"authsome-mcp-proxy\[dynamodb\]"),
-        ):
-            build_client_storage(_dynamodb_config())
+        assert config.oauth_state is None
 
 
 class TestProviderWiring:
@@ -131,7 +122,8 @@ class TestProviderWiring:
             store_dynamodb_table="oauth-state",
             **extra,
         )
-        storage = build_client_storage(config)
+        assert config.oauth_state is not None
+        storage = build_client_storage(config.oauth_state)
         assert storage is not None
         with patch(f"authsome_mcp_proxy.inbound_auth.{patched}") as mock_class:
             build_inbound_auth(config, client_storage=storage)
@@ -180,10 +172,10 @@ def test_nothing_configured_imports_no_backend_dependency(tmp_path):
 
         from fastmcp.server.auth.oidc_proxy import OIDCConfiguration, OIDCProxy
 
-        from authsome_mcp_proxy import __main__, mcp_proxy
-        from authsome_mcp_proxy.inbound_auth import (
-            build_client_storage, build_inbound_auth,
-        )
+        from fastmcp_seaworthy import build_client_storage
+
+        from authsome_mcp_proxy import __main__
+        from authsome_mcp_proxy.inbound_auth import build_inbound_auth
 
         with patch("sys.argv", [
             "authsome-mcp-proxy", "http://upstream.example.com/mcp",
@@ -196,7 +188,7 @@ def test_nothing_configured_imports_no_backend_dependency(tmp_path):
         ]):
             config = __main__.build_proxy_config(__main__.cli())
 
-        storage = build_client_storage(config)
+        storage = build_client_storage(config.oauth_state)
         assert storage is None, storage
         discovery = OIDCConfiguration(
             issuer="https://idp.example.com",
@@ -229,61 +221,6 @@ def test_nothing_configured_imports_no_backend_dependency(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == ""
-
-
-class TestDynamoDBStorage:
-    async def test_values_at_rest_are_encrypted(self, dynamodb_table: str, aws_env):
-        """FastMCP encrypts only the store it builds itself. What reaches the
-        table must carry no plaintext -- it holds the upstream IdP's tokens."""
-        storage = build_client_storage(_dynamodb_config(dynamodb_table))
-        assert storage is not None
-        await storage.open()
-        try:
-            await storage.store.put(
-                key="upstream-token-id",
-                value={"access_token": "plaintext-upstream-access-token"},
-                collection="mcp-upstream-tokens",
-            )
-            assert await storage.store.get(
-                key="upstream-token-id", collection="mcp-upstream-tokens"
-            ) == {"access_token": "plaintext-upstream-access-token"}
-        finally:
-            await storage.close()
-
-        items = dynamodb_client(aws_env).scan(TableName=dynamodb_table)["Items"]
-        assert len(items) == 1
-        raw = items[0]["value"]["S"]
-        assert "plaintext-upstream-access-token" not in raw
-        assert "access_token" not in raw
-
-    async def test_missing_table_fails_at_startup_naming_it(self, aws_env):
-        """Infrastructure creates the table; with auto_create off a missing one
-        is a deployment error, reported at startup with the table's name."""
-        storage = build_client_storage(_dynamodb_config("no-such-table"))
-        assert storage is not None
-
-        with pytest.raises(ValueError, match="'no-such-table'") as excinfo:
-            await storage.open()
-
-        assert "STORE_DYNAMODB_TABLE" in str(excinfo.value)
-
-    async def test_auto_create_creates_a_missing_table(self, aws_env):
-        table = "created-by-the-proxy"
-        storage = build_client_storage(
-            _dynamodb_config(table, store_dynamodb_auto_create=True)
-        )
-        assert storage is not None
-
-        await storage.open()
-        await storage.close()
-
-        description = dynamodb_client(aws_env).describe_table(TableName=table)
-        assert {
-            k["AttributeName"]: k["KeyType"] for k in description["Table"]["KeySchema"]
-        } == {
-            "collection": "HASH",
-            "key": "RANGE",
-        }
 
 
 _HTTP_ARGS = [
@@ -435,16 +372,16 @@ class TestServeHttp:
                 return_value=storage,
             ) as build_storage,
             patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth") as build_inbound,
-            patch("authsome_mcp_proxy.mcp_proxy.create_streamable_http_app"),
-            patch("authsome_mcp_proxy.mcp_proxy.HostRouter"),
-            patch("authsome_mcp_proxy.mcp_proxy.uvicorn") as uvicorn_mod,
+            patch("fastmcp_seaworthy.serve.create_streamable_http_app"),
+            patch("fastmcp_seaworthy.serve.HostRouter"),
+            patch("fastmcp_seaworthy.serve.uvicorn") as uvicorn_mod,
         ):
             uvicorn_mod.Server.return_value.serve = AsyncMock(
                 side_effect=lambda: events.append("serve")
             )
             await mcp_proxy._serve_http(_fake_server(), config, show_banner=False)
 
-        build_storage.assert_called_once_with(config)
+        build_storage.assert_called_once_with(config.oauth_state)
         assert [c.kwargs["client_storage"] for c in build_inbound.call_args_list] == [
             storage,
             storage,
@@ -454,9 +391,9 @@ class TestServeHttp:
     async def test_default_store_passes_none(self):
         with (
             patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth") as build_inbound,
-            patch("authsome_mcp_proxy.mcp_proxy.create_streamable_http_app"),
-            patch("authsome_mcp_proxy.mcp_proxy.HostRouter"),
-            patch("authsome_mcp_proxy.mcp_proxy.uvicorn") as uvicorn_mod,
+            patch("fastmcp_seaworthy.serve.create_streamable_http_app"),
+            patch("fastmcp_seaworthy.serve.HostRouter"),
+            patch("fastmcp_seaworthy.serve.uvicorn") as uvicorn_mod,
         ):
             uvicorn_mod.Server.return_value.serve = AsyncMock()
             await mcp_proxy._serve_http(
@@ -474,9 +411,9 @@ class TestServeHttp:
                 return_value=storage,
             ),
             patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth"),
-            patch("authsome_mcp_proxy.mcp_proxy.create_streamable_http_app"),
-            patch("authsome_mcp_proxy.mcp_proxy.HostRouter"),
-            patch("authsome_mcp_proxy.mcp_proxy.uvicorn") as uvicorn_mod,
+            patch("fastmcp_seaworthy.serve.create_streamable_http_app"),
+            patch("fastmcp_seaworthy.serve.HostRouter"),
+            patch("fastmcp_seaworthy.serve.uvicorn") as uvicorn_mod,
             pytest.raises(ValueError, match="Cannot use DynamoDB table"),
         ):
             await mcp_proxy._serve_http(

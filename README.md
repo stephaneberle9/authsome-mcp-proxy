@@ -439,7 +439,9 @@ the `Host` header cannot tell them apart.
 > exchange, where `redirect_uri` must byte-match what the IdP saw earlier.
 > The proxy therefore builds one app per hostname over one shared server
 > and dispatches on `Host` — a duplicated front door, not a duplicated
-> backend.
+> backend. That machinery comes from
+> [fastmcp-seaworthy](https://github.com/stephaneberle9/fastmcp-seaworthy),
+> which other FastMCP servers use the same way.
 
 ## Surviving restarts
 
@@ -480,7 +482,9 @@ values written to an external store are Fernet-encrypted with a key
 derived from it, the same way FastMCP encrypts its own file store, so the
 table never holds an upstream token in plaintext. A `JWT_SIGNING_KEY` is
 worth setting with the default file store too: it decouples the stored
-state from the upstream client secret.
+state from the upstream client secret. The settings and the store come
+from [fastmcp-seaworthy](https://github.com/stephaneberle9/fastmcp-seaworthy),
+so other FastMCP servers built on it read the same variables.
 
 **DynamoDB.** The backend needs the `dynamodb` extra, which the published
 container image already includes. Credentials and region come from the

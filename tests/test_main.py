@@ -802,7 +802,7 @@ class TestMultipleProxyBaseUrls:
         assert config.additional_proxy_base_urls == ["https://mcp.example.com"]
 
     def test_only_separators_is_rejected(self):
-        with pytest.raises(ValueError, match="no usable URL"):
+        with pytest.raises(ValueError, match="no usable base URL"):
             self._config(" , , ")
 
     def test_reads_a_list_from_the_environment(self):

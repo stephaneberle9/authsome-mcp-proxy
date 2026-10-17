@@ -1,11 +1,11 @@
 """Tests for authsome_mcp_proxy.inbound_auth — provider factory dispatch."""
 
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 import pytest
 
 from authsome_mcp_proxy.config import WebConfig
-from authsome_mcp_proxy.inbound_auth import _disable_cimd, build_inbound_auth
+from authsome_mcp_proxy.inbound_auth import build_inbound_auth
 
 
 def _cognito_config(**overrides) -> WebConfig:
@@ -107,6 +107,7 @@ class TestInboundAuthDispatch:
             client_secret="csec",
             required_scopes=["openid"],
             base_url="https://mcp.example.com",
+            enable_cimd=True,
         )
 
     def test_google_dispatches_to_GoogleProvider(self):
@@ -150,16 +151,6 @@ class TestInboundAuthDispatch:
             enable_cimd=True,
         )
 
-    def test_cognito_does_not_receive_an_enable_cimd_kwarg(self):
-        """AWSCognitoProvider has no such keyword in any stable release up to
-        3.4.7 (upstream added it for 4.0). Passing one would be a TypeError at
-        construction, so the CIMD default has to be left alone here."""
-        config = _cognito_config()
-        with patch("authsome_mcp_proxy.inbound_auth.AWSCognitoProvider") as mock_class:
-            build_inbound_auth(config)
-
-        assert "enable_cimd" not in mock_class.call_args.kwargs
-
     def test_unknown_provider_raises(self):
         # Bypass dataclass-level Literal validation by mutating after construction.
         config = WebConfig(
@@ -175,13 +166,12 @@ class TestInboundAuthDispatch:
 
 class TestCimdToggle:
     """``WebConfig.enable_cimd`` has to reach every provider that can act on it,
-    and must not reach the two that can't.
+    and must not reach Keycloak, which can't.
 
     FastMCP implements CIMD inside ``OAuthProxy`` and defaults it on, so the
     only thing this proxy owns is forwarding the operator's choice. The tests
     that matter are the negative ones: an operator who turned CIMD off must
-    actually get it off, including on the Cognito path where the keyword
-    doesn't exist.
+    actually get it off.
     """
 
     @pytest.mark.parametrize(
@@ -191,6 +181,16 @@ class TestCimdToggle:
                 "oidc",
                 "OIDCProxy",
                 {"issuer_url": "https://idp.example.com", "client_id": "cid"},
+            ),
+            (
+                "aws-cognito",
+                "AWSCognitoProvider",
+                {
+                    "client_id": "cid",
+                    "client_secret": "csec",
+                    "cognito_user_pool_id": "eu-central-1_abc",
+                    "cognito_aws_region": "eu-central-1",
+                },
             ),
             ("google", "GoogleProvider", {"client_id": "cid"}),
             (
@@ -220,55 +220,18 @@ class TestCimdToggle:
         assert mock_class.call_args.kwargs["enable_cimd"] is enable_cimd
 
     @pytest.mark.parametrize("enable_cimd", [True, False])
-    def test_cognito_is_switched_after_construction(self, enable_cimd):
-        """Enabled is what OIDCProxy's default already gives us, so only the
-        off case may touch the provider."""
-        config = _cognito_config(enable_cimd=enable_cimd)
-        with (
-            patch("authsome_mcp_proxy.inbound_auth.AWSCognitoProvider") as mock_class,
-            patch("authsome_mcp_proxy.inbound_auth._disable_cimd") as mock_disable,
-        ):
-            provider = build_inbound_auth(config)
-
-        assert provider is mock_class.return_value
-        if enable_cimd:
-            mock_disable.assert_not_called()
-        else:
-            mock_disable.assert_called_once_with(mock_class.return_value)
-
-    def test_disable_cimd_clears_the_manager(self):
-        """The switch itself, unmocked: what build_inbound_auth delegates to has
-        to leave the attribute FastMCP gates CIMD on set to None."""
-
-        class _FakeProxy:
-            _cimd_manager = object()
-
-        provider = _FakeProxy()
-        _disable_cimd(provider)  # ty: ignore[invalid-argument-type]
-
-        assert provider._cimd_manager is None
-
-    def test_disable_cimd_raises_when_fastmcp_drops_the_attribute(self):
-        """If a future FastMCP renames or removes ``_cimd_manager``, the switch
-        must fail loudly rather than silently leave CIMD on."""
-        with pytest.raises(RuntimeError, match="_cimd_manager"):
-            _disable_cimd(Mock(spec=[]))
-
-    @pytest.mark.parametrize("enable_cimd", [True, False])
     def test_keycloak_is_unaffected(self, enable_cimd):
         """Keycloak is the authorization server there, so the proxy has nothing
-        to forward -- and nothing to reach into either."""
+        to forward."""
         config = WebConfig(
             inbound_auth_provider="keycloak",
             proxy_base_url="https://mcp.example.com",
             issuer_url="https://kc.example.com/realms/r",
             enable_cimd=enable_cimd,
         )
-        with (
-            patch("authsome_mcp_proxy.inbound_auth.KeycloakAuthProvider") as mock_class,
-            patch("authsome_mcp_proxy.inbound_auth._disable_cimd") as mock_disable,
-        ):
+        with patch(
+            "authsome_mcp_proxy.inbound_auth.KeycloakAuthProvider"
+        ) as mock_class:
             build_inbound_auth(config)
 
         assert "enable_cimd" not in mock_class.call_args.kwargs
-        mock_disable.assert_not_called()

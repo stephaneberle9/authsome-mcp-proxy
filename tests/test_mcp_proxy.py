@@ -397,12 +397,16 @@ def _fake_server():
 @contextmanager
 def _serve_patches():
     """Patch the serving layer's collaborators: app factory, auth factory,
-    host router and uvicorn. Yields them as a SimpleNamespace."""
+    host router and uvicorn. Yields them as a SimpleNamespace.
+
+    All but the auth factory live in fastmcp-seaworthy, which does the serving;
+    patching them there checks that what this proxy hands over -- base URLs,
+    providers, transport keywords -- arrives where it takes effect."""
     with (
-        patch("authsome_mcp_proxy.mcp_proxy.create_streamable_http_app") as create_app,
+        patch("fastmcp_seaworthy.serve.create_streamable_http_app") as create_app,
         patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth") as build_inbound,
-        patch("authsome_mcp_proxy.mcp_proxy.HostRouter") as host_router,
-        patch("authsome_mcp_proxy.mcp_proxy.uvicorn") as uvicorn_mod,
+        patch("fastmcp_seaworthy.serve.HostRouter") as host_router,
+        patch("fastmcp_seaworthy.serve.uvicorn") as uvicorn_mod,
     ):
         uvicorn_mod.Server.return_value.serve = AsyncMock()
         yield SimpleNamespace(
@@ -612,7 +616,7 @@ async def test_unknown_transport_kwarg_fails_at_startup():
                 _fake_server(),
                 _web_config(),
                 False,
-                not_a_real_option=True,  # ty: ignore[unknown-argument]
+                not_a_real_option=True,
             )
 
 
@@ -677,15 +681,16 @@ async def test_transport_is_rejected_before_any_connection_is_attempted():
 @pytest.mark.parametrize("name", ["mcp_proxy", "config"])
 async def test_serve_http_internals_cannot_be_shadowed_by_transport_kwargs(name):
     """mcp_proxy and config are positional-only, so a caller's **transport_kwargs
-    can neither rebind them nor collide with them. Without the marker this would
-    raise the far more puzzling "got multiple values for argument"."""
+    can neither rebind them nor collide with them: the stray keyword is passed
+    on and rejected by name as an unknown transport option, instead of raising
+    the far more puzzling "got multiple values for argument"."""
     with _serve_patches():
-        with pytest.raises(TypeError, match="positional-only"):
+        with pytest.raises(TypeError, match=name):
             await mcp_proxy._serve_http(
                 _fake_server(),
                 _web_config(),
                 False,
-                **{name: "hijacked"},  # ty: ignore[invalid-argument-type]
+                **{name: "hijacked"},
             )
 
 

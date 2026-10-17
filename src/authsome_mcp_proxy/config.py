@@ -27,6 +27,8 @@ mechanism is used).
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
+from fastmcp_seaworthy import OAuthStateSettings, StoreBackend, check_distinct_hosts
+
 AuthProvider: TypeAlias = Literal["oidc", "keycloak", "aws-cognito", "google", "azure"]
 """Inbound auth provider type for web mode.
 
@@ -56,15 +58,6 @@ OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "st
 - ``static`` -- proxy injects a configured literal header value. Covers API
   keys, API tokens, and personal access tokens (PATs) uniformly -- same wire
   shape under different upstream vocabularies.
-"""
-
-StoreBackend: TypeAlias = Literal["file", "dynamodb"]
-"""Where the OAuth proxy keeps its state in web mode.
-
-- ``file`` -- FastMCP's own encrypted file store under ``${FASTMCP_HOME}``.
-  Durable on a VM disk or a mounted volume, lost with a container filesystem.
-- ``dynamodb`` -- an AWS DynamoDB table, shared by every replica and surviving
-  any restart. Needs the ``dynamodb`` extra.
 """
 
 
@@ -110,7 +103,7 @@ class WebConfig:
             second hostname needs a second provider, not merely a second entry
             on the load balancer. One app is built per base URL and requests
             are dispatched between them on the ``Host`` header (see
-            :mod:`authsome_mcp_proxy.host_router`). Every entry's
+            :mod:`fastmcp_seaworthy.host_router`). Every entry's
             ``{base_url}/auth/callback`` must be registered as a redirect URI
             with the IdP. Empty by default -- single-hostname deployments are
             unaffected.
@@ -161,7 +154,7 @@ class WebConfig:
             ``store_backend`` other than ``file``.
         store_backend: Where the proxy keeps client registrations, the upstream
             IdP's tokens and the mapping from its own tokens to them. See
-            :data:`StoreBackend`.
+            :data:`fastmcp_seaworthy.StoreBackend`.
         store_dynamodb_table: DynamoDB table name -- required for
             ``store_backend='dynamodb'``.
         store_dynamodb_region: AWS region of the table. Optional; unset, the
@@ -260,25 +253,32 @@ class WebConfig:
         """Every public base URL this proxy answers under, canonical first."""
         return [self.proxy_base_url, *self.additional_proxy_base_urls]
 
+    @property
+    def oauth_state(self) -> OAuthStateSettings | None:
+        """The signing key and store settings, or ``None`` for ``keycloak``.
+
+        ``None`` because there Keycloak is the authorization server: the proxy
+        issues no tokens and keeps no OAuth state, so whatever is set is inert.
+        """
+        if self.inbound_auth_provider == "keycloak":
+            return None
+        return OAuthStateSettings(
+            jwt_signing_key=self.jwt_signing_key,
+            store_backend=self.store_backend,
+            store_dynamodb_table=self.store_dynamodb_table,
+            store_dynamodb_region=self.store_dynamodb_region,
+            store_dynamodb_auto_create=self.store_dynamodb_auto_create,
+        )
+
     def _validate_base_urls(self) -> None:
         """Reject base URL sets the ``Host`` header could not tell apart.
 
         Duplicate hostnames are caught here rather than at startup so the
-        failure names the config that caused it. ``host_of`` also rejects a
-        value that isn't a URL at all (e.g. a bare hostname), which would
-        otherwise surface much later as an unroutable identity.
+        failure names the config that caused it. A value that isn't a URL at
+        all (e.g. a bare hostname) is rejected too, which would otherwise
+        surface much later as an unroutable identity.
         """
-        from .host_router import host_of
-
-        seen: dict[str, str] = {}
-        for base_url in self.all_proxy_base_urls:
-            host = host_of(base_url)
-            if host in seen:
-                raise ValueError(
-                    f"base URLs {seen[host]!r} and {base_url!r} share the hostname "
-                    f"{host!r}; the Host header cannot distinguish them"
-                )
-            seen[host] = base_url
+        check_distinct_hosts(self.all_proxy_base_urls)
 
     def _validate_inbound(self) -> None:
         if self.inbound_auth_provider == "keycloak":

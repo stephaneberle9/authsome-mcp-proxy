@@ -25,19 +25,15 @@ upstream connection.
 import logging
 from typing import Any
 
-import fastmcp
 import httpx2
-import uvicorn
 from fastmcp import Client
 from fastmcp.server import create_proxy
-from fastmcp.server.http import create_streamable_http_app
-from fastmcp.utilities.logging import temporary_log_level
-from starlette.middleware import Middleware as ASGIMiddleware
+from fastmcp.server.auth.auth import AuthProvider
+from fastmcp_seaworthy import build_client_storage, serve_http
 
 from .config import DesktopConfig, ProxyConfig, WebConfig
 from .external_oidc import ExternalOIDCAuth
-from .host_router import HostRouter
-from .inbound_auth import build_client_storage, build_inbound_auth
+from .inbound_auth import build_inbound_auth
 from .outbound_auth import build_outbound_auth
 from .upstream_identity import UpstreamIdentityMiddleware
 
@@ -64,9 +60,11 @@ async def run_async(
         **transport_kwargs: Additional keyword arguments passed to the
             transport layer. For stdio: ``log_level``. For http: ``host``,
             ``port``, ``log_level``, ``path``, ``uvicorn_config``,
-            ``json_response``, ``stateless_http`` / ``stateless`` and
-            ``middleware`` -- see :func:`_serve_http`. Unrecognized keywords
-            raise at startup rather than being ignored.
+            ``json_response``, ``stateless_http`` / ``stateless``,
+            ``middleware``, ``host_origin_protection``, ``allowed_hosts``,
+            ``allowed_origins`` and ``session_idle_timeout`` -- see
+            ``fastmcp_seaworthy.serve_http``. Unrecognized keywords raise at
+            startup rather than being ignored.
 
     Raises:
         TypeError: If ``config`` is not a recognized ``ProxyConfig`` type.
@@ -131,7 +129,7 @@ async def _run_web(
     """Run the proxy in http mode with FastMCP inbound auth + configurable outbound.
 
     One ASGI app is built per entry in ``config.all_proxy_base_urls``, each with
-    its own inbound auth provider, and a :class:`~authsome_mcp_proxy.host_router.HostRouter`
+    its own inbound auth provider, and a :class:`~fastmcp_seaworthy.HostRouter`
     picks between them on the request's ``Host``. A FastMCP auth provider bakes
     its ``base_url`` in at construction and advertises it everywhere -- resource
     metadata, authorization-server metadata, the IdP ``redirect_uri``, minted
@@ -172,132 +170,44 @@ async def _serve_http(
     config: WebConfig,
     /,
     show_banner: bool = True,
-    *,
-    host: str | None = None,
-    port: int | None = None,
-    log_level: str | None = None,
-    path: str | None = None,
-    uvicorn_config: dict[str, Any] | None = None,
-    json_response: bool | None = None,
-    stateless_http: bool | None = None,
-    stateless: bool | None = None,
-    middleware: list[ASGIMiddleware] | None = None,
+    **transport_kwargs: Any,
 ) -> None:
     """Serve one ASGI app per configured base URL behind a host router.
 
-    Mirrors ``FastMCP.run_http_async`` -- same settings fallbacks, same uvicorn
-    configuration, same keyword surface -- but builds N apps instead of one.
-    ``create_streamable_http_app`` accepts the ``auth`` provider explicitly,
-    which ``http_app()`` does not, and FastMCP's ``_lifespan_manager`` is
-    reference-counted, so the children can share a single server without
-    fighting over its lifespan.
-
-    The keywords are spelled out rather than splatted onward so that this
-    function, not uvicorn, decides what an operator may set: ``run_async``'s
-    ``**transport_kwargs`` land here directly, and anything unrecognized fails
-    at startup instead of being silently dropped.
+    fastmcp-seaworthy's ``serve_http`` does the serving -- it mirrors
+    ``FastMCP.run_http_async`` but builds one app per base URL, routed on
+    ``Host`` -- so this function only supplies what is the proxy's own: the
+    base URLs, the inbound auth provider for each, and the OAuth state store.
+    ``transport_kwargs`` are forwarded as they are; ``serve_http`` spells out
+    its keywords, so anything unrecognized fails at startup instead of being
+    silently dropped.
 
     ``mcp_proxy`` and ``config`` are positional-only because they would
     otherwise be shadowable by a caller's ``**transport_kwargs``.
 
-    Args:
-        mcp_proxy: The shared FastMCP server backing every identity.
-        config: Web-mode configuration; supplies the base URLs to serve.
-        show_banner: Whether to display the server startup banner.
-        host: Bind address. Defaults to FastMCP's setting.
-        port: Bind port. Defaults to FastMCP's setting.
-        log_level: Log level for the duration of the run.
-        path: Path the MCP endpoint is mounted at, shared by every identity.
-        uvicorn_config: Extra uvicorn ``Config`` kwargs, merged over the
-            defaults. Note that ``lifespan="off"`` would stop every child app's
-            session manager from ever starting.
-        json_response: Use JSON rather than SSE responses.
-        stateless_http: Create a new transport per request. Note that with
-            sessions enabled each identity keeps its own session store, since
-            each has its own app -- a session opened against one hostname is
-            not resumable against another. That is the intended boundary: they
-            are separate OAuth resources.
-        stateless: Alias for ``stateless_http``, matching FastMCP's CLI.
-        middleware: ASGI middleware applied to every identity's app. Starlette
-            instantiates these per app, so one list is safe to share.
+    One store serves every hostname: the providers of different hostnames are
+    separate OAuth identities but one proxy, and ``serve_http`` opens the store
+    before building any of them, so a backend the proxy cannot reach fails at
+    startup rather than at the first sign-in.
     """
-    from fastmcp.utilities.cli import log_server_banner
+    oauth_state = config.oauth_state
+    client_storage = (
+        build_client_storage(oauth_state) if oauth_state is not None else None
+    )
 
-    if stateless is not None and stateless_http is None:
-        stateless_http = stateless
-
-    host = host if host is not None else fastmcp.settings.host
-    port = port if port is not None else fastmcp.settings.port
-    mcp_path = path if path is not None else fastmcp.settings.streamable_http_path
-    resolved_log_level = (
-        log_level if log_level is not None else fastmcp.settings.log_level
-    ).lower()
-
-    # One store for every hostname, built before any provider. The providers of
-    # different hostnames are separate OAuth identities but one proxy: a second
-    # store per hostname would split one deployment's state, and a backend
-    # connection per hostname would multiply its clients for nothing. FastMCP's
-    # default file store is shared the same way -- its directory depends only on
-    # the signing key. Opened here so a backend the proxy cannot reach fails at
-    # startup rather than at the first sign-in.
-    client_storage = build_client_storage(config)
-    if client_storage is not None:
-        await client_storage.open()
-
-    apps = {
-        base_url: create_streamable_http_app(
-            server=mcp_proxy,
-            streamable_http_path=mcp_path,
-            auth=build_inbound_auth(
-                config, base_url=base_url, client_storage=client_storage
-            ),
-            json_response=(
-                json_response
-                if json_response is not None
-                else fastmcp.settings.json_response
-            ),
-            stateless_http=(
-                stateless_http
-                if stateless_http is not None
-                else fastmcp.settings.stateless_http
-            ),
-            debug=fastmcp.settings.debug,
-            middleware=middleware,
+    def auth_for(base_url: str) -> AuthProvider:
+        return build_inbound_auth(
+            config, base_url=base_url, client_storage=client_storage
         )
-        for base_url in config.all_proxy_base_urls
-    }
-    app = HostRouter(apps, canonical_base_url=config.proxy_base_url)
 
-    if show_banner:
-        log_server_banner(server=mcp_proxy)
-
-    config_kwargs: dict[str, Any] = {
-        "timeout_graceful_shutdown": 2,
-        "lifespan": "on",
-        "ws": "websockets-sansio",
-    }
-    config_kwargs.update(uvicorn_config or {})
-    if "log_config" not in config_kwargs and "log_level" not in config_kwargs:
-        config_kwargs["log_level"] = resolved_log_level
-
-    with temporary_log_level(log_level):
-        # Private on purpose, and why fastmcp is capped below 5: the public
-        # per-app lifespans each enter this same manager through their session
-        # manager, so they share one server lifespan only because it is
-        # reference-counted -- a property no public API promises. Holding it
-        # open here, as run_http_async does, keeps the server lifespan running
-        # from before the first child starts until after the last one stops.
-        async with mcp_proxy._lifespan_manager():
-            for base_url in config.all_proxy_base_urls:
-                logger.info("Serving MCP proxy at %s%s", base_url.rstrip("/"), mcp_path)
-            server = uvicorn.Server(
-                uvicorn.Config(app, host=host, port=port, **config_kwargs)
-            )
-            try:
-                await server.serve()
-            finally:
-                if client_storage is not None:
-                    await client_storage.close()
+    await serve_http(
+        mcp_proxy,
+        config.all_proxy_base_urls,
+        auth_for,
+        client_storage=client_storage,
+        show_banner=show_banner,
+        **transport_kwargs,
+    )
 
 
 def _server_identity_kwargs(config: WebConfig) -> dict[str, Any]:

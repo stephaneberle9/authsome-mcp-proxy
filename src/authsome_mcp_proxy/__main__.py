@@ -22,21 +22,22 @@ import asyncio
 import logging
 import os
 import sys
-from typing import cast
+from typing import cast, get_args
 
 import httpx2
 from exceptiongroup import BaseExceptionGroup
+from fastmcp_seaworthy import StoreBackend, split_base_urls
 from mcp.shared.exceptions import MCPError
 
 from . import __version__, mcp_proxy
-from .config import DesktopConfig, ProxyConfig, StoreBackend, WebConfig
+from .config import DesktopConfig, ProxyConfig, WebConfig
 
 logger = logging.getLogger(__name__)
 
 
 _INBOUND_AUTH_PROVIDERS = ("oidc", "keycloak", "aws-cognito", "google", "azure")
 _OUTBOUND_AUTH_MODES = ("forward", "oauth-client-credentials", "static")
-_STORE_BACKENDS = ("file", "dynamodb")
+_STORE_BACKENDS: tuple[str, ...] = get_args(StoreBackend)
 
 _TRUTHY = ("1", "true", "yes", "on")
 _FALSY = ("0", "false", "no", "off")
@@ -435,15 +436,14 @@ def _split_base_urls(raw: str) -> list[str]:
     identity with an empty hostname.
 
     Raises:
-        ValueError: If nothing usable remains.
+        ValueError: If nothing usable remains, naming the setting.
     """
-    base_urls = [entry.strip() for entry in raw.split(",")]
-    base_urls = [entry for entry in base_urls if entry]
-    if not base_urls:
+    try:
+        return split_base_urls(raw)
+    except ValueError as e:
         raise ValueError(
-            "--proxy-base-url (or MCP_PROXY_BASE_URL env var) contains no usable URL"
-        )
-    return base_urls
+            f"--proxy-base-url (or MCP_PROXY_BASE_URL env var): {e}"
+        ) from e
 
 
 def _store_backend(raw: str | None) -> StoreBackend:

@@ -114,10 +114,9 @@ async def test_cimd_is_not_advertised_when_disabled():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enable_cimd", [True, False])
 async def test_cognito_switch_reaches_the_metadata_too(enable_cimd):
-    """The Cognito path can't take an ``enable_cimd`` keyword, so it is switched
-    by clearing ``_cimd_manager`` after construction. That workaround is only
-    worth anything if it changes what clients actually discover -- assert it
-    here rather than trusting the private attribute."""
+    """Cognito takes ``enable_cimd`` like the other providers since fastmcp 4.0
+    (PrefectHQ/fastmcp#4719); before that this proxy had to clear a private
+    attribute instead. Asserted on the wire, where clients discover it."""
     metadata = await _metadata(
         _app(enable_cimd=enable_cimd, config=_cognito_config(enable_cimd=enable_cimd))
     )

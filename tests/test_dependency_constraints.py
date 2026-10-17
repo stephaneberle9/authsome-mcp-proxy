@@ -64,8 +64,10 @@ class TestPublishedDependencyConstraints:
     def test_fastmcp_5_is_excluded(self):
         """Web mode depends on fastmcp's private ``_lifespan_manager``.
 
-        One FastMCP server backs an ASGI app per public hostname, and the
-        server's lifespan is shared between them only because
+        Through fastmcp-seaworthy's ``serve_http``, which caps fastmcp below 5
+        too; the cap is asserted here as well because it is this package's
+        published promise. One FastMCP server backs an ASGI app per public
+        hostname, and the server's lifespan is shared between them only because
         ``_lifespan_manager`` is reference-counted. A private method carries no
         compatibility promise, and ``uvx`` resolves the newest fastmcp at
         install time, so a major that renames it or drops the counting must be

@@ -30,24 +30,23 @@ dependencies = [
     #   upstream.
     #
     # The ceiling guards a private API. Web mode serves one ASGI app per public
-    # hostname over a single FastMCP server and holds that server's lifespan
-    # open through FastMCP._lifespan_manager(), relying on it being
-    # reference-counted so the per-hostname apps share one lifespan instead of
-    # each running it. No public API offers that for several apps (checked
-    # through 4.1.0), and a private method carries no compatibility promise:
-    # uvx users resolve the newest fastmcp at install time, so a major that
-    # renames it or drops the counting would break them before CI noticed.
+    # hostname over a single FastMCP server through fastmcp-seaworthy, which
+    # holds that server's lifespan open via FastMCP._lifespan_manager() and
+    # relies on it being reference-counted. fastmcp-seaworthy caps fastmcp
+    # below 5 for that reason; the cap is repeated here so this package's own
+    # metadata states what it was tested against, and uvx users -- who resolve
+    # the newest fastmcp at install time -- cannot get a major nobody tested.
     "fastmcp>=4.0.8,<5",
+    # Multi-hostname serving (one OAuth identity per public base URL) and the
+    # OAuth proxy's restart-safe state (signing key + external store), shared
+    # with other FastMCP servers instead of kept as a copy here.
+    "fastmcp-seaworthy",
     "py-key-value-aio[disk]>=0.3.0",
-    # Both arrive transitively via fastmcp, but web mode imports them directly --
-    # starlette for the ASGI types the host router is written against, uvicorn to
-    # serve the router itself. Declared so a future fastmcp that stops depending on
-    # them fails at resolution rather than at import. The floors match what the
-    # existing chain already guarantees (fastmcp -> uvicorn>=0.35,
-    # fastmcp -> mcp -> starlette>=0.27), so neither narrows resolution; the APIs
-    # used (starlette.types, starlette.middleware.Middleware, uvicorn.Config /
-    # Server) long predate both.
-    "starlette>=0.27",
+    # Arrives transitively via fastmcp, but desktop mode imports it directly to
+    # serve the local OAuth callback. Declared so a future fastmcp that stops
+    # depending on it fails at resolution rather than at import. The floor
+    # matches what fastmcp already guarantees (uvicorn>=0.35), so it narrows
+    # nothing; uvicorn.server.Server long predates it.
     "uvicorn>=0.35",
     # Likewise transitive-but-imported-directly. Floors match what the chain
     # already enforces (fastmcp-slim -> httpx2>=2.5.0, exceptiongroup>=1.2.2,
@@ -62,21 +61,14 @@ dependencies = [
     "httpx2>=2.5.0",
     "mcp>=2.0.0",
     "pydantic>=2.12.0",
-    # Transitive-but-imported as well: the encryption wrapper around an external
-    # store backend is keyed with a cryptography Fernet. The floor is the one
-    # py-key-value-aio's own encryption wrappers require, so it narrows nothing.
-    "cryptography>=45.0.0",
 ]
 
 [project.optional-dependencies]
 # Store backends for the OAuth proxy state (STORE_BACKEND). Each is an extra so
-# the default file store pulls in no cloud SDK; the backend's store class is
-# imported only when it is selected. The floor matches what fastmcp already
-# enforces (py-key-value-aio>=0.4.4,<0.5), where DynamoDBStore takes the
-# auto_create switch the proxy relies on to leave table creation to
-# infrastructure.
+# the default file store pulls in no cloud SDK; fastmcp-seaworthy imports the
+# backend's store class only when it is selected.
 dynamodb = [
-    "py-key-value-aio[dynamodb]>=0.4.4",
+    "fastmcp-seaworthy[dynamodb]",
 ]
 
 [dependency-groups]
@@ -95,19 +87,10 @@ test = [
     "pytest-timeout>=2.0.0",
     "inline-snapshot>=0.6.0",
     "packaging>=22",
-    # The DynamoDB store backend is tested against moto's server mode, bound to
-    # 127.0.0.1 in-process, so the suite needs neither AWS nor Docker. Server
-    # mode rather than moto's in-process patching: the store talks through
-    # aioboto3, whose aiohttp transport the botocore patches do not intercept.
-    # Server mode needs flask and flask-cors, which moto declares only under
-    # its "server" extra; that extra also drags in every other service's
-    # dependencies (cfn-lint, sympy, graphql-core, ...), so the two are named
-    # here instead. The backend extra itself is pulled in through the project
-    # so CI, which installs no extras, still exercises the backend.
+    # The store backends themselves are tested in fastmcp-seaworthy. The extra
+    # is pulled in so the provider-wiring tests can build a DynamoDB store, and
+    # so CI, which installs no extras, still imports the backend.
     "authsome-mcp-proxy[dynamodb]",
-    "moto[dynamodb]>=5.1.0",
-    "flask>=3.0",
-    "flask-cors>=4.0",
 ]
 
 [project.scripts]
@@ -141,6 +124,14 @@ exclude = [
 
 [tool.uv]
 default-groups = ["dev", "test"]
+
+[tool.uv.sources]
+# Until fastmcp-seaworthy's first release is on PyPI. Pinned to a commit rather
+# than a local path so CI resolves it too. Remove this entry, and give the
+# dependencies above a floor of the released version, before the next release
+# of this package: tool.uv.sources never reaches a wheel's metadata, so a wheel
+# built now would require a fastmcp-seaworthy that PyPI does not have yet.
+fastmcp-seaworthy = { git = "https://github.com/stephaneberle9/fastmcp-seaworthy", rev = "054624c6697ac11b1d1b175d37dbbc951b1b31a6" }
 
 [tool.deptry]
 # These are regexes, not globs. "*.log" is an invalid regex ("repetition
