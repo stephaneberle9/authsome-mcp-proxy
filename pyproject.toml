@@ -39,8 +39,10 @@ dependencies = [
     "fastmcp>=4.0.8,<5",
     # Multi-hostname serving (one OAuth identity per public base URL) and the
     # OAuth proxy's restart-safe state (signing key + external store), shared
-    # with other FastMCP servers instead of kept as a copy here.
-    "fastmcp-seaworthy",
+    # with other FastMCP servers instead of kept as a copy here. 0.x may change
+    # its API in a minor release, so the ceiling stays below 1 until it is
+    # stable.
+    "fastmcp-seaworthy>=0.1,<1",
     "py-key-value-aio[disk]>=0.3.0",
     # Arrives transitively via fastmcp, but desktop mode imports it directly to
     # serve the local OAuth callback. Declared so a future fastmcp that stops
@@ -68,7 +70,7 @@ dependencies = [
 # the default file store pulls in no cloud SDK; fastmcp-seaworthy imports the
 # backend's store class only when it is selected.
 dynamodb = [
-    "fastmcp-seaworthy[dynamodb]",
+    "fastmcp-seaworthy[dynamodb]>=0.1,<1",
 ]
 
 [dependency-groups]
@@ -124,14 +126,6 @@ exclude = [
 
 [tool.uv]
 default-groups = ["dev", "test"]
-
-[tool.uv.sources]
-# Until fastmcp-seaworthy's first release is on PyPI. Pinned to a commit rather
-# than a local path so CI resolves it too. Remove this entry, and give the
-# dependencies above a floor of the released version, before the next release
-# of this package: tool.uv.sources never reaches a wheel's metadata, so a wheel
-# built now would require a fastmcp-seaworthy that PyPI does not have yet.
-fastmcp-seaworthy = { git = "https://github.com/stephaneberle9/fastmcp-seaworthy", rev = "054624c6697ac11b1d1b175d37dbbc951b1b31a6" }
 
 [tool.deptry]
 # These are regexes, not globs. "*.log" is an invalid regex ("repetition
