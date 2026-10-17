@@ -333,7 +333,8 @@ def cli() -> argparse.Namespace:
     parser.add_argument(
         "--proxy-version",
         default=None,
-        help="Display version string advertised to downstream MCP clients "
+        help="Display version string advertised to downstream MCP clients. "
+        "Without this, the upstream's version is relayed "
         "(can also be set via MCP_PROXY_VERSION env var)",
     )
     parser.add_argument(

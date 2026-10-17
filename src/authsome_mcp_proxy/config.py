@@ -193,13 +193,16 @@ class WebConfig:
         In stdio mode the proxy connects once at startup and relays the
         upstream's ``serverInfo`` so the proxy appears transparent. In web
         mode that startup relay isn't always possible (``outbound_auth=
-        'forward'`` has no inbound session yet) so these fields let the
-        operator hard-code what downstream clients should see. Each maps
+        'forward'`` has no inbound session yet), so all fields but the name
+        are relayed per handshake instead (see
+        :mod:`authsome_mcp_proxy.upstream_identity`) and these fields let the
+        operator override what downstream clients should see. Each maps
         directly to the matching ``create_proxy()`` kwarg.
 
         proxy_name: Display name (e.g. ``"Acme Analytics"``). Without this, the
             proxy falls back to FastMCP's auto-generated ``FastMCPProxy-xxxx``.
-        proxy_version: Display version string.
+        proxy_version: Display version string. Without this, the
+            upstream's version is relayed.
         proxy_instructions: Instructions the LLM sees alongside the
             tool catalog -- influences tool selection.
         proxy_website_url: Project URL shown in client UIs.

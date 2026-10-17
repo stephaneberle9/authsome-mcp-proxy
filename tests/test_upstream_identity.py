@@ -15,10 +15,10 @@ UPSTREAM_ICON = mt.Icon(
 )
 
 
-def _upstream():
+def _upstream(version="9.9.9"):
     return FastMCP(
         name="upstream-name",
-        version="9.9.9",
+        version=version,
         instructions="use the upstream's tools wisely",
         website_url="https://upstream.example.com",
         icons=[UPSTREAM_ICON],
@@ -78,6 +78,17 @@ async def test_downstream_sees_the_upstreams_identity(mode):
 
 
 @PROTOCOL_ERAS
+async def test_downstream_sees_the_upstreams_version_unless_configured(mode):
+    proxy = _proxy(_upstream(), name="Acme Analytics MCP")
+
+    async with Client(proxy, mode=mode) as client:
+        info = client.server_info
+
+    assert info.name == "Acme Analytics MCP"
+    assert info.version == "9.9.9"
+
+
+@PROTOCOL_ERAS
 async def test_operator_configured_fields_win(mode):
     proxy = _proxy(
         _upstream(),
@@ -118,6 +129,26 @@ async def test_identity_is_refetched_after_the_ttl():
             pass
 
     assert fetch.calls == 2
+
+
+@PROTOCOL_ERAS
+async def test_a_changed_upstream_version_is_shown_after_the_ttl(mode):
+    """An upstream redeploy shows its new version without a proxy restart."""
+    deployed = {"upstream": _upstream()}
+    proxy = create_proxy(Client(deployed["upstream"]), name="proxy")
+    proxy.add_middleware(
+        UpstreamIdentityMiddleware(
+            lambda: mcp_proxy._relay_upstream_identity(deployed["upstream"], None),
+            ttl_seconds=0,
+        )
+    )
+
+    async with Client(proxy, mode=mode) as client:
+        assert client.server_info.version == "9.9.9"
+
+    deployed["upstream"] = _upstream(version="10.0.0")
+    async with Client(proxy, mode=mode) as client:
+        assert client.server_info.version == "10.0.0"
 
 
 async def test_a_failed_fetch_leaves_the_handshake_intact(caplog):
@@ -173,7 +204,8 @@ async def test_nothing_is_fetched_when_the_operator_configured_everything():
     proxy = create_proxy(Client(_upstream()), name="proxy")
     proxy.add_middleware(
         UpstreamIdentityMiddleware(
-            fetch, configured_fields=("instructions", "website_url", "icons")
+            fetch,
+            configured_fields=("instructions", "version", "website_url", "icons"),
         )
     )
 

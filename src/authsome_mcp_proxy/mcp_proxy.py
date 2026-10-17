@@ -146,10 +146,11 @@ async def _run_web(
 
     # The stdio path's pre-flight relay cannot run here: with
     # outbound_auth='forward' there is no inbound session yet to borrow a
-    # credential from. Name and version come from the operator's config --
-    # without them FastMCP falls back to its auto-generated FastMCPProxy-xxxx
-    # name -- and the upstream's instructions, website URL and icons are
-    # relayed per handshake by UpstreamIdentityMiddleware instead.
+    # credential from. The name comes from the operator's config -- without it
+    # FastMCP falls back to its auto-generated FastMCPProxy-xxxx name -- and the
+    # upstream's instructions, version, website URL and icons are relayed per
+    # handshake by UpstreamIdentityMiddleware instead, unless the operator
+    # configured them.
     proxy_kwargs = _server_identity_kwargs(config)
     proxy_client = Client(transport=upstream_url, auth=outbound_auth)
 

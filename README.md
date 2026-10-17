@@ -382,15 +382,16 @@ In web mode the proxy cannot read the upstream at startup: with
 `--outbound-auth forward` the upstream only accepts a user's token, and
 no user has connected yet. So the identity is split:
 
-- **Instructions, website URL and icons** are relayed from the upstream
-  when a client connects. The first handshake fetches them with that
+- **Instructions, version, website URL and icons** are relayed from the
+  upstream when a client connects. The first handshake fetches them with that
   client's credential; the result is cached for 10 minutes, so a
   redeployed upstream is picked up without restarting the proxy. If the
   fetch fails, the client still connects and sees the proxy's own values.
-- **Name and version** are yours to set. FastMCP also uses the server
-  name outside the handshake, where a relayed value would not reach it.
-  Unset, they fall back to FastMCP's auto-generated `FastMCPProxy-xxxx`
-  and FastMCP's own version.
+  If the upstream cannot be reached and you set no version, FastMCP's own
+  version is shown.
+- **The name** is yours to set. FastMCP also uses the server name
+  outside the handshake, where a relayed value would not reach it.
+  Unset, it falls back to FastMCP's auto-generated `FastMCPProxy-xxxx`.
 
 Any field you set explicitly wins over the relayed one:
 
@@ -775,9 +776,9 @@ All options can be set via CLI flags or matching environment variables
 | Env var | CLI flag | Description |
 |---|---|---|
 | `MCP_PROXY_NAME` | `--proxy-name` | Display name (e.g. `"Acme Analytics"`). |
-| `MCP_PROXY_VERSION` | `--proxy-version` | Display version. |
-| `MCP_PROXY_INSTRUCTIONS` | `--proxy-instructions` | Tool-selection hints for the LLM. |
-| `MCP_PROXY_WEBSITE_URL` | `--proxy-website-url` | Project URL shown in client UIs. |
+| `MCP_PROXY_VERSION` | `--proxy-version` | Display version. Optional override: unset, the upstream's version is relayed. |
+| `MCP_PROXY_INSTRUCTIONS` | `--proxy-instructions` | Tool-selection hints for the LLM. Optional override: unset, the upstream's instructions are relayed. |
+| `MCP_PROXY_WEBSITE_URL` | `--proxy-website-url` | Project URL shown in client UIs. Optional override: unset, the upstream's website URL is relayed. |
 
 **Inbound auth** (http mode — pick a provider, then supply the fields it
 needs):
@@ -901,8 +902,8 @@ offline_access`). Cognito is the exception — it issues them automatically
 once the app client has "Authorization code grant" enabled.
 
 **Web-mode proxy advertises itself as `FastMCPProxy-xxxx`** — set the
-`--proxy-name` (and ideally `--proxy-version`, `--proxy-instructions`,
-`--proxy-website-url`) flags. See [Identity advertised to downstream
+`--proxy-name` flag; the version, instructions and website URL are
+relayed from the upstream. See [Identity advertised to downstream
 clients](#identity-advertised-to-downstream-clients).
 
 **MCP client doesn't recognise the proxy at all (stdio)** — JSON

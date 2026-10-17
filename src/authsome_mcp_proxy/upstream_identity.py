@@ -5,8 +5,8 @@ into the proxy (see :func:`authsome_mcp_proxy.mcp_proxy._relay_upstream_identity
 Web mode cannot: with ``outbound_auth='forward'`` the only credential the
 upstream accepts is a user's, and at startup there is no user yet. Without a
 relay, a client connecting through the proxy is shown FastMCP's defaults instead
-of the upstream's instructions, website URL and icons -- and the instructions
-are what tell the model how to use the upstream's tools.
+of the upstream's instructions, version, website URL and icons -- and the
+instructions are what tell the model how to use the upstream's tools.
 
 :class:`UpstreamIdentityMiddleware` closes that gap at the one point where a
 credential exists: the downstream client's own ``initialize`` (handshake-era
@@ -14,10 +14,12 @@ protocol) or ``server/discover`` (modern protocol). The first one fetches the
 upstream's identity using that request's credential and caches it; every one
 patches the relayed fields into the result it returns.
 
-Name and version are deliberately not relayed. They are the operator's to set
-(``proxy_name`` / ``proxy_version``), because FastMCP also uses the server name
-outside the wire result -- as the audience of sealed request state and in
-tracing spans -- where a per-request rewrite would not reach it.
+The name is deliberately not relayed. It is the operator's to set
+(``proxy_name``), because FastMCP also uses the server name outside the wire
+result -- as the audience of sealed request state and in tracing spans -- where
+a per-request rewrite would not reach it. The version has no such second use:
+FastMCP reads it only to build ``serverInfo``, so it is relayed like the other
+fields, and ``proxy_version`` merely overrides it.
 """
 
 from __future__ import annotations
@@ -34,7 +36,7 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 logger = logging.getLogger(__name__)
 
 #: Identity fields relayed from the upstream, keyed as ``create_proxy`` kwargs.
-RELAYED_FIELDS = ("instructions", "website_url", "icons")
+RELAYED_FIELDS = ("instructions", "version", "website_url", "icons")
 
 
 class UpstreamIdentityMiddleware(Middleware):
@@ -47,7 +49,8 @@ class UpstreamIdentityMiddleware(Middleware):
         configured_fields: Fields the operator set explicitly. They win over
             the upstream's values and are never overwritten.
         ttl_seconds: How long a fetched identity is reused. The upstream can be
-            redeployed with new instructions while the proxy keeps running.
+            redeployed with new instructions or a new version while the proxy
+            keeps running.
         retry_after_seconds: How long to wait after a failed fetch before
             trying again, so an unreachable upstream does not slow down every
             connection. A previously fetched identity keeps being served
@@ -153,5 +156,7 @@ class UpstreamIdentityMiddleware(Middleware):
 def _patched_server_info(
     server_info: mt.Implementation, identity: dict[str, Any]
 ) -> mt.Implementation:
-    update = {f: identity[f] for f in ("website_url", "icons") if f in identity}
+    update = {
+        f: identity[f] for f in ("version", "website_url", "icons") if f in identity
+    }
     return server_info.model_copy(update=update) if update else server_info

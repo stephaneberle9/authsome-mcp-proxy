@@ -240,7 +240,12 @@ async def test_run_async_web_wires_outbound_auth_and_defers_serving():
         mock_proxy_server.add_middleware.assert_called_once()
         middleware = mock_proxy_server.add_middleware.call_args.args[0]
         assert isinstance(middleware, UpstreamIdentityMiddleware)
-        assert middleware._relayed_fields == ("instructions", "website_url", "icons")
+        assert middleware._relayed_fields == (
+            "instructions",
+            "version",
+            "website_url",
+            "icons",
+        )
 
         mock_serve.assert_called_once_with(mock_proxy_server, web_config, False)
 
