@@ -388,6 +388,29 @@ class TestServeHttp:
         ]
         assert events == ["open", "serve", "close"]
 
+    async def test_the_oauth_state_in_use_is_logged(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        with (
+            patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth"),
+            patch("fastmcp_seaworthy.serve.create_streamable_http_app"),
+            patch("fastmcp_seaworthy.serve.HostRouter"),
+            patch("fastmcp_seaworthy.serve.uvicorn") as uvicorn_mod,
+            caplog.at_level("INFO", logger="authsome_mcp_proxy.mcp_proxy"),
+        ):
+            uvicorn_mod.Server.return_value.serve = AsyncMock()
+            await mcp_proxy._serve_http(
+                _fake_server(),
+                _oidc_config(jwt_signing_key=SIGNING_KEY),
+                show_banner=False,
+            )
+
+        assert (
+            "OAuth state in FastMCP's file store under FASTMCP_HOME, "
+            "tokens signed with JWT_SIGNING_KEY"
+        ) in caplog.text
+        assert SIGNING_KEY not in caplog.text
+
     async def test_default_store_passes_none(self):
         with (
             patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth") as build_inbound,

@@ -482,7 +482,13 @@ values written to an external store are Fernet-encrypted with a key
 derived from it, the same way FastMCP encrypts its own file store, so the
 table never holds an upstream token in plaintext. A `JWT_SIGNING_KEY` is
 worth setting with the default file store too: it decouples the stored
-state from the upstream client secret. The settings and the store come
+state from the upstream client secret. It must be at least 32 characters;
+a shorter one is refused at startup. The startup log names the store and
+signing key in use. Only the stored values are encrypted: each entry's
+collection, key and expiry, among them client IDs and, while they are
+valid, authorization codes, are readable to whoever can read the table, so
+keep write access to it with the proxy alone. An entry that is not
+encrypted is ignored rather than trusted. The settings and the store come
 from [fastmcp-seaworthy](https://github.com/stephaneberle9/fastmcp-seaworthy),
 so other FastMCP servers built on it read the same variables.
 
@@ -806,7 +812,7 @@ needs):
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
-| `JWT_SIGNING_KEY` | `--jwt-signing-key` | _derived from `OIDC_CLIENT_SECRET`_ | Signs the tokens the proxy issues and keys its store's encryption. Required with a `STORE_BACKEND` other than `file`. |
+| `JWT_SIGNING_KEY` | `--jwt-signing-key` | _derived from `OIDC_CLIENT_SECRET`_ | Signs the tokens the proxy issues and keys its store's encryption. At least 32 characters. Required with a `STORE_BACKEND` other than `file`. |
 | `STORE_BACKEND` | `--store-backend {file,dynamodb}` | `file` | Where client registrations and sessions are kept. `dynamodb` needs the `dynamodb` extra. |
 | `STORE_DYNAMODB_TABLE` | `--store-dynamodb-table` | _required for `dynamodb`_ | DynamoDB table name. |
 | `STORE_DYNAMODB_REGION` | `--store-dynamodb-region` | _AWS SDK default_ | AWS region of the table. |

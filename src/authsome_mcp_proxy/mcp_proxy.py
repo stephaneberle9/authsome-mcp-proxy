@@ -194,6 +194,10 @@ async def _serve_http(
     client_storage = (
         build_client_storage(oauth_state) if oauth_state is not None else None
     )
+    if oauth_state is not None:
+        # Every accepted combination starts a healthy-looking proxy, including
+        # a signing key without a STORE_BACKEND, which stays on the file store.
+        logger.info("%s", oauth_state.describe())
 
     def auth_for(base_url: str) -> AuthProvider:
         return build_inbound_auth(

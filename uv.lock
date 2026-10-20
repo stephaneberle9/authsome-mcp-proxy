@@ -405,8 +405,8 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.9" },
     { name = "exceptiongroup", specifier = ">=1.2.2" },
     { name = "fastmcp", specifier = ">=4.0.8,<5" },
-    { name = "fastmcp-seaworthy", specifier = ">=0.1,<1" },
-    { name = "fastmcp-seaworthy", extras = ["dynamodb"], marker = "extra == 'dynamodb'", specifier = ">=0.1,<1" },
+    { name = "fastmcp-seaworthy", specifier = ">=0.2,<1" },
+    { name = "fastmcp-seaworthy", extras = ["dynamodb"], marker = "extra == 'dynamodb'", specifier = ">=0.2,<1" },
     { name = "httpx2", specifier = ">=2.5.0" },
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "py-key-value-aio", extras = ["disk"], specifier = ">=0.3.0" },
@@ -957,7 +957,7 @@ wheels = [
 
 [[package]]
 name = "fastmcp-seaworthy"
-version = "0.1.0"
+version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
@@ -966,9 +966,9 @@ dependencies = [
     { name = "starlette" },
     { name = "uvicorn" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/f7/72/c25f739bfe9834011938c2c21f1c593ce4ae6ef6bf613a1ce6dd42a62646/fastmcp_seaworthy-0.1.0.tar.gz", hash = "sha256:76cbb78bb9de38ec3a4d3cc1e556298dafb1c5320ad44e4385629524d9d9d347", size = 302727, upload-time = "2026-10-17T07:19:14.414Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/48/d8/1e1bdc69b8c7d30a995f0829903210d764aa6b887c4092912f569f051a29/fastmcp_seaworthy-0.2.0.tar.gz", hash = "sha256:d720ed9825f948b03cf8b60cc610d7dd9e41ddcf46dc2f8fe263e26a75f2fdcc", size = 305429, upload-time = "2026-10-20T11:12:00.771Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/a6/3c/985b2a72df244012b7899d8b2f325d158f66db1964ecff541e1ee832ffcd/fastmcp_seaworthy-0.1.0-py3-none-any.whl", hash = "sha256:49bd3236c49da8449c893ccc1858dae46fc56c9241a2575ca7eff8ce0a15dd74", size = 23519, upload-time = "2026-10-17T07:19:13.319Z" },
+    { url = "https://files.pythonhosted.org/packages/2a/78/1c092c009b22f16121e7312ab6ab84033e838180b75044f143baaa3bdcaf/fastmcp_seaworthy-0.2.0-py3-none-any.whl", hash = "sha256:d3edec921a01d986ce75f425b09aa810c43e8d503449e8d94c54ab5efa417daf", size = 25319, upload-time = "2026-10-20T11:11:59.749Z" },
 ]
 
 [package.optional-dependencies]
