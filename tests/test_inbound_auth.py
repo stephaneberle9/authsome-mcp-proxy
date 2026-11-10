@@ -1,7 +1,8 @@
 """Tests for authsome_mcp_proxy.inbound_auth — provider factory dispatch."""
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx2
 import pytest
 
 from authsome_mcp_proxy.config import WebConfig
@@ -117,8 +118,9 @@ class TestInboundAuthDispatch:
             client_id="cid",
             client_secret="csec",
         )
+        http_client = MagicMock(spec=httpx2.AsyncClient)
         with patch("authsome_mcp_proxy.inbound_auth.GoogleProvider") as mock_class:
-            build_inbound_auth(config)
+            build_inbound_auth(config, http_client=http_client)
 
         mock_class.assert_called_once_with(
             client_id="cid",
@@ -126,6 +128,7 @@ class TestInboundAuthDispatch:
             required_scopes=None,
             base_url="https://mcp.example.com",
             enable_cimd=True,
+            http_client=http_client,
         )
 
     def test_azure_dispatches_to_AzureProvider(self):

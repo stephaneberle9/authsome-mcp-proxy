@@ -189,6 +189,10 @@ async def _serve_http(
     separate OAuth identities but one proxy, and ``serve_http`` opens the store
     before building any of them, so a backend the proxy cannot reach fails at
     startup rather than at the first sign-in.
+
+    One HTTP client serves every hostname too, for the providers that verify
+    each inbound token with a call to the IdP (``google``); it is closed when
+    serving stops.
     """
     oauth_state = config.oauth_state
     client_storage = (
@@ -199,19 +203,24 @@ async def _serve_http(
         # a signing key without a STORE_BACKEND, which stays on the file store.
         logger.info("%s", oauth_state.describe())
 
-    def auth_for(base_url: str) -> AuthProvider:
-        return build_inbound_auth(
-            config, base_url=base_url, client_storage=client_storage
-        )
+    async with httpx2.AsyncClient(timeout=10.0) as http_client:
 
-    await serve_http(
-        mcp_proxy,
-        config.all_proxy_base_urls,
-        auth_for,
-        client_storage=client_storage,
-        show_banner=show_banner,
-        **transport_kwargs,
-    )
+        def auth_for(base_url: str) -> AuthProvider:
+            return build_inbound_auth(
+                config,
+                base_url=base_url,
+                client_storage=client_storage,
+                http_client=http_client,
+            )
+
+        await serve_http(
+            mcp_proxy,
+            config.all_proxy_base_urls,
+            auth_for,
+            client_storage=client_storage,
+            show_banner=show_banner,
+            **transport_kwargs,
+        )
 
 
 def _server_identity_kwargs(config: WebConfig) -> dict[str, Any]:

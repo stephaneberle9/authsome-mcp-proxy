@@ -2,6 +2,7 @@ from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx2
 import pytest
 from starlette.middleware import Middleware
 
@@ -475,6 +476,29 @@ async def test_serve_http_shares_one_server_across_identities():
     assert {id(c.kwargs["server"]) for c in mocks.create_app.call_args_list} == {
         id(server)
     }
+
+
+@pytest.mark.asyncio
+async def test_serve_http_shares_one_http_client_across_identities():
+    """Google verifies every inbound token with a call to Google, so the
+    providers get one pooled client for all hostnames, closed once serving
+    stops, instead of a new connection per request."""
+    web_config = WebConfig(
+        inbound_auth_provider="google",
+        proxy_base_url="https://mcp.example.io",
+        additional_proxy_base_urls=["https://mcp.example.com"],
+        client_id="cid",
+        client_secret="csec",
+    )
+
+    with _serve_patches() as mocks:
+        await mcp_proxy._serve_http(_fake_server(), web_config, show_banner=False)
+
+    clients = [c.kwargs["http_client"] for c in mocks.build_inbound.call_args_list]
+    assert len(clients) == 2
+    assert clients[0] is clients[1]
+    assert isinstance(clients[0], httpx2.AsyncClient)
+    assert clients[0].is_closed
 
 
 @pytest.mark.asyncio

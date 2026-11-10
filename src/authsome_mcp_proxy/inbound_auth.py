@@ -32,6 +32,11 @@ key-value store. ``WebConfig.oauth_state`` turns the settings into
 fastmcp-seaworthy's ``OAuthStateSettings``; its ``build_client_storage`` builds
 the store and ``provider_kwargs`` hands both to the provider.
 
+The ``google`` branch also takes a shared HTTP client. Google's access tokens
+are opaque, so FastMCP verifies every inbound request with a call to Google;
+without a shared client, each of those calls opens and closes its own
+connection. The caller owns the client and closes it when serving stops.
+
 To add a new IdP:
 
 1. Add a literal to ``AuthProvider`` in :mod:`authsome_mcp_proxy.config`.
@@ -49,6 +54,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
+import httpx2
 from fastmcp.server.auth.auth import AuthProvider as FastMCPAuthProvider
 from fastmcp.server.auth.oidc_proxy import OIDCProxy
 from fastmcp.server.auth.providers.aws import AWSCognitoProvider
@@ -72,6 +78,7 @@ def build_inbound_auth(
     config: WebConfig,
     base_url: str | None = None,
     client_storage: ClientStorage | None = None,
+    http_client: httpx2.AsyncClient | None = None,
 ) -> FastMCPAuthProvider:
     """Instantiate the FastMCP auth provider matching ``config.inbound_auth_provider``.
 
@@ -97,6 +104,9 @@ def build_inbound_auth(
             ``None`` for FastMCP's default file store. Multi-hostname
             deployments pass the same instance for every base URL. Ignored for
             ``keycloak``.
+        http_client: A shared client for the per-request token verification
+            calls to Google, so they reuse connections, or ``None`` for a new
+            client per call. The caller closes it. Used only by ``google``.
 
     Returns:
         A FastMCP ``AuthProvider`` subclass instance.
@@ -164,6 +174,7 @@ def build_inbound_auth(
             required_scopes=scopes,
             base_url=base_url,
             enable_cimd=config.enable_cimd,
+            http_client=http_client,
             **oauth_state,
         )
 
