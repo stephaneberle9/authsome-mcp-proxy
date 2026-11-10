@@ -1,5 +1,8 @@
 """
-OIDC Auth client provider for external OpenID Connect (OIDC) providers.
+Outbound auth for desktop (stdio) mode: sign the local user in at an OIDC provider.
+
+Web (http) mode does not use this module; its outbound auth lives in
+:mod:`authsome_mcp_proxy.outbound_auth`.
 
 This module provides an OAuth client for external OIDC providers (Keycloak, Auth0,
 Okta, etc.) that handles the complete OAuth 2.0 authorization code flow with PKCE
@@ -45,7 +48,7 @@ from uvicorn.server import Server
 
 from . import __version__
 
-__all__ = ["ExternalOIDCAuth"]
+__all__ = ["DesktopOIDCAuth"]
 
 # Use 'logging' instead of 'fastmcp.utilities.logging' to avoid mixin of FastMCP-formatted log message
 logger = logging.getLogger(__name__)
@@ -206,7 +209,7 @@ class OIDCContext:
         self.token_expiry_time = None
 
 
-class ExternalOIDCAuth(httpx2.Auth):
+class DesktopOIDCAuth(httpx2.Auth):
     """
     OAuth client provider that authenticates against external OIDC providers.
 
@@ -223,9 +226,9 @@ class ExternalOIDCAuth(httpx2.Auth):
         ```python
         from fastmcp.client import Client
 
-        from authsome_mcp_proxy.external_oidc import ExternalOIDCAuth
+        from authsome_mcp_proxy.desktop_auth import DesktopOIDCAuth
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://your-keycloak.example.com/realms/myrealm",
             client_id="your-client-id",
             client_secret="your-client-secret",

@@ -24,7 +24,7 @@ async def test_run_async_desktop_relays_server_info():
         issuer_url="https://auth.example.com", client_id="test-client"
     )
 
-    with patch("authsome_mcp_proxy.mcp_proxy.ExternalOIDCAuth"):
+    with patch("authsome_mcp_proxy.mcp_proxy.DesktopOIDCAuth"):
         with patch("authsome_mcp_proxy.mcp_proxy.Client") as mock_client_cls:
             mock_client = AsyncMock()
             mock_client.__aenter__.return_value = mock_client
@@ -87,7 +87,7 @@ async def test_run_async_desktop_uses_fresh_proxy_client():
         issuer_url="https://auth.example.com", client_id="test-client"
     )
 
-    with patch("authsome_mcp_proxy.mcp_proxy.ExternalOIDCAuth"):
+    with patch("authsome_mcp_proxy.mcp_proxy.DesktopOIDCAuth"):
         with patch("authsome_mcp_proxy.mcp_proxy.Client") as mock_client_cls:
             info_client = AsyncMock()
             info_client.__aenter__.return_value = info_client
@@ -686,7 +686,7 @@ async def test_transport_is_rejected_before_any_connection_is_attempted():
     )
 
     with (
-        patch("authsome_mcp_proxy.mcp_proxy.ExternalOIDCAuth") as mock_auth,
+        patch("authsome_mcp_proxy.mcp_proxy.DesktopOIDCAuth") as mock_auth,
         patch("authsome_mcp_proxy.mcp_proxy.Client") as mock_client_cls,
     ):
         with pytest.raises(ValueError, match="transport is not configurable"):

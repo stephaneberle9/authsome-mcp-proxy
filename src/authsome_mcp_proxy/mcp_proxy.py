@@ -5,7 +5,7 @@ MCP proxy with two operating modes selected by config type.
   local process by the MCP client (Claude Desktop, Claude Code via
   ``claude mcp add --transport stdio``, Cursor, Codex, etc.). The
   proxy itself runs the OAuth Authorization Code + PKCE flow against an
-  external OIDC IdP via :class:`ExternalOIDCAuth`, caches tokens on
+  external OIDC IdP via :class:`DesktopOIDCAuth`, caches tokens on
   disk, and forwards them as Bearer tokens to the upstream MCP server.
   No inbound auth (local trust).
 - :class:`WebConfig` -> http transport. The proxy runs as a standalone
@@ -32,7 +32,7 @@ from fastmcp.server.auth.auth import AuthProvider
 from fastmcp_seaworthy import build_client_storage, serve_http
 
 from .config import DesktopConfig, ProxyConfig, WebConfig
-from .external_oidc import ExternalOIDCAuth
+from .desktop_auth import DesktopOIDCAuth
 from .inbound_auth import build_inbound_auth
 from .outbound_auth import build_outbound_auth
 from .upstream_identity import UpstreamIdentityMiddleware
@@ -99,7 +99,7 @@ async def _run_desktop(
     **transport_kwargs: Any,
 ) -> None:
     """Run the proxy in stdio mode against an external OIDC IdP."""
-    auth = ExternalOIDCAuth(
+    auth = DesktopOIDCAuth(
         issuer_url=config.issuer_url,
         client_id=config.client_id,
         client_secret=config.client_secret,

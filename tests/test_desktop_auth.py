@@ -1,4 +1,4 @@
-"""Tests for authsome_mcp_proxy.external_oidc module."""
+"""Tests for authsome_mcp_proxy.desktop_auth module."""
 
 import logging
 import uuid
@@ -9,8 +9,8 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 from exceptiongroup import BaseExceptionGroup
 
-from authsome_mcp_proxy.external_oidc import (
-    ExternalOIDCAuth,
+from authsome_mcp_proxy.desktop_auth import (
+    DesktopOIDCAuth,
     OIDCContext,
     _ExternalOIDCConfiguration,
     _setup_token_refresh_logging,
@@ -294,18 +294,18 @@ class TestOIDCContext:
         assert context.can_refresh_token() is True
 
 
-class TestExternalOIDCAuth:
-    """Test ExternalOIDCAuth initialization and validation."""
+class TestDesktopOIDCAuth:
+    """Test DesktopOIDCAuth initialization and validation."""
 
     def test_init_raises_on_missing_issuer_url(self):
         """Test that __init__ raises ValueError when issuer_url is empty."""
         with pytest.raises(ValueError, match="Missing required issuer URL"):
-            ExternalOIDCAuth(issuer_url="", client_id="test-client")
+            DesktopOIDCAuth(issuer_url="", client_id="test-client")
 
     def test_init_raises_on_missing_client_id(self):
         """Test that __init__ raises ValueError when client_id is empty."""
         with pytest.raises(ValueError, match="Missing required client id"):
-            ExternalOIDCAuth(issuer_url="https://auth.example.com", client_id="")
+            DesktopOIDCAuth(issuer_url="https://auth.example.com", client_id="")
 
 
 class TestDiscoveryIssuerValidation:
@@ -320,7 +320,7 @@ class TestDiscoveryIssuerValidation:
     @staticmethod
     def _make_auth(
         tmp_path: Path, configured_issuer_url: str, published_issuer: str
-    ) -> ExternalOIDCAuth:
+    ) -> DesktopOIDCAuth:
         """Construct the auth against a discovery response publishing
         `published_issuer`.
 
@@ -339,10 +339,10 @@ class TestDiscoveryIssuerValidation:
             "id_token_signing_alg_values_supported": ["RS256"],
         }
         with (
-            patch("authsome_mcp_proxy.external_oidc._setup_token_refresh_logging"),
-            patch("authsome_mcp_proxy.external_oidc.httpx2.get", return_value=response),
+            patch("authsome_mcp_proxy.desktop_auth._setup_token_refresh_logging"),
+            patch("authsome_mcp_proxy.desktop_auth.httpx2.get", return_value=response),
         ):
-            return ExternalOIDCAuth(
+            return DesktopOIDCAuth(
                 issuer_url=configured_issuer_url,
                 client_id="test-client",
                 token_storage_cache_dir=tmp_path / "cache",
@@ -417,10 +417,10 @@ class TestTokenRefreshLogging:
 
     def test_setup_token_refresh_logging_creates_file_handler(self, tmp_path):
         """Test that _setup_token_refresh_logging creates a file handler in the cache directory."""
-        from authsome_mcp_proxy import external_oidc
+        from authsome_mcp_proxy import desktop_auth
 
         # Reset global state
-        external_oidc._token_refresh_log_handler = None
+        desktop_auth._token_refresh_log_handler = None
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
@@ -432,47 +432,47 @@ class TestTokenRefreshLogging:
         assert log_file.exists()
 
         # Verify handler was created and attached
-        assert external_oidc._token_refresh_log_handler is not None
-        assert isinstance(external_oidc._token_refresh_log_handler, logging.FileHandler)
+        assert desktop_auth._token_refresh_log_handler is not None
+        assert isinstance(desktop_auth._token_refresh_log_handler, logging.FileHandler)
 
         # Clean up
-        logger = logging.getLogger("authsome_mcp_proxy.external_oidc")
-        if external_oidc._token_refresh_log_handler:
-            logger.removeHandler(external_oidc._token_refresh_log_handler)
-        external_oidc._token_refresh_log_handler = None
+        logger = logging.getLogger("authsome_mcp_proxy.desktop_auth")
+        if desktop_auth._token_refresh_log_handler:
+            logger.removeHandler(desktop_auth._token_refresh_log_handler)
+        desktop_auth._token_refresh_log_handler = None
 
     def test_setup_token_refresh_logging_only_runs_once(self, tmp_path):
         """Test that _setup_token_refresh_logging only sets up logging once."""
-        from authsome_mcp_proxy import external_oidc
+        from authsome_mcp_proxy import desktop_auth
 
         # Reset global state
-        external_oidc._token_refresh_log_handler = None
+        desktop_auth._token_refresh_log_handler = None
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
 
         # Call setup twice
         _setup_token_refresh_logging(cache_dir)
-        first_handler = external_oidc._token_refresh_log_handler
+        first_handler = desktop_auth._token_refresh_log_handler
 
         _setup_token_refresh_logging(cache_dir)
-        second_handler = external_oidc._token_refresh_log_handler
+        second_handler = desktop_auth._token_refresh_log_handler
 
         # Should be the same handler instance
         assert first_handler is second_handler
 
         # Clean up
-        logger = logging.getLogger("authsome_mcp_proxy.external_oidc")
-        if external_oidc._token_refresh_log_handler:
-            logger.removeHandler(external_oidc._token_refresh_log_handler)
-        external_oidc._token_refresh_log_handler = None
+        logger = logging.getLogger("authsome_mcp_proxy.desktop_auth")
+        if desktop_auth._token_refresh_log_handler:
+            logger.removeHandler(desktop_auth._token_refresh_log_handler)
+        desktop_auth._token_refresh_log_handler = None
 
     def test_setup_token_refresh_logging_creates_log_file(self, tmp_path):
         """Test that log file is created at the correct path."""
-        from authsome_mcp_proxy import external_oidc
+        from authsome_mcp_proxy import desktop_auth
 
         # Reset global state
-        external_oidc._token_refresh_log_handler = None
+        desktop_auth._token_refresh_log_handler = None
 
         cache_dir = tmp_path / "test_cache"
         cache_dir.mkdir()
@@ -484,24 +484,24 @@ class TestTokenRefreshLogging:
         assert log_file.is_file()
 
         # Clean up
-        logger = logging.getLogger("authsome_mcp_proxy.external_oidc")
-        if external_oidc._token_refresh_log_handler:
-            logger.removeHandler(external_oidc._token_refresh_log_handler)
-        external_oidc._token_refresh_log_handler = None
+        logger = logging.getLogger("authsome_mcp_proxy.desktop_auth")
+        if desktop_auth._token_refresh_log_handler:
+            logger.removeHandler(desktop_auth._token_refresh_log_handler)
+        desktop_auth._token_refresh_log_handler = None
 
     def test_setup_token_refresh_logging_handler_config(self, tmp_path):
         """Test that the file handler is configured correctly."""
-        from authsome_mcp_proxy import external_oidc
+        from authsome_mcp_proxy import desktop_auth
 
         # Reset global state
-        external_oidc._token_refresh_log_handler = None
+        desktop_auth._token_refresh_log_handler = None
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
 
         _setup_token_refresh_logging(cache_dir)
 
-        handler = external_oidc._token_refresh_log_handler
+        handler = desktop_auth._token_refresh_log_handler
         assert handler is not None
 
         # Verify handler configuration
@@ -514,17 +514,17 @@ class TestTokenRefreshLogging:
         assert formatter.datefmt == "%Y-%m-%d %H:%M:%S"
 
         # Clean up
-        logger = logging.getLogger("authsome_mcp_proxy.external_oidc")
-        if external_oidc._token_refresh_log_handler:
-            logger.removeHandler(external_oidc._token_refresh_log_handler)
-        external_oidc._token_refresh_log_handler = None
+        logger = logging.getLogger("authsome_mcp_proxy.desktop_auth")
+        if desktop_auth._token_refresh_log_handler:
+            logger.removeHandler(desktop_auth._token_refresh_log_handler)
+        desktop_auth._token_refresh_log_handler = None
 
     def test_logging_writes_to_file(self, tmp_path):
         """Test that log messages are actually written to the file."""
-        from authsome_mcp_proxy import external_oidc
+        from authsome_mcp_proxy import desktop_auth
 
         # Reset global state
-        external_oidc._token_refresh_log_handler = None
+        desktop_auth._token_refresh_log_handler = None
 
         cache_dir = tmp_path / "cache"
         cache_dir.mkdir()
@@ -532,7 +532,7 @@ class TestTokenRefreshLogging:
         _setup_token_refresh_logging(cache_dir)
 
         # Write a log message
-        logger = logging.getLogger("authsome_mcp_proxy.external_oidc")
+        logger = logging.getLogger("authsome_mcp_proxy.desktop_auth")
         # Ensure logger level allows DEBUG messages
         original_level = logger.level
         logger.setLevel(logging.DEBUG)
@@ -541,9 +541,9 @@ class TestTokenRefreshLogging:
         logger.info(test_message)
 
         # Force flush and close to ensure write
-        if external_oidc._token_refresh_log_handler:
-            external_oidc._token_refresh_log_handler.flush()
-            external_oidc._token_refresh_log_handler.close()
+        if desktop_auth._token_refresh_log_handler:
+            desktop_auth._token_refresh_log_handler.flush()
+            desktop_auth._token_refresh_log_handler.close()
 
         # Verify message was written
         log_file = cache_dir / "token_refresh.log"
@@ -551,25 +551,25 @@ class TestTokenRefreshLogging:
         assert test_message in log_content
 
         # Clean up
-        if external_oidc._token_refresh_log_handler:
-            logger.removeHandler(external_oidc._token_refresh_log_handler)
+        if desktop_auth._token_refresh_log_handler:
+            logger.removeHandler(desktop_auth._token_refresh_log_handler)
         logger.setLevel(original_level)
-        external_oidc._token_refresh_log_handler = None
+        desktop_auth._token_refresh_log_handler = None
 
-    def test_external_oidc_auth_calls_setup_logging(self, tmp_path):
-        """Test that ExternalOIDCAuth calls _setup_token_refresh_logging during init."""
-        from authsome_mcp_proxy import external_oidc
+    def test_desktop_oidc_auth_calls_setup_logging(self, tmp_path):
+        """Test that DesktopOIDCAuth calls _setup_token_refresh_logging during init."""
+        from authsome_mcp_proxy import desktop_auth
 
         # Reset global state
-        external_oidc._token_refresh_log_handler = None
+        desktop_auth._token_refresh_log_handler = None
 
         # Mock both the OIDC config fetch and the setup_logging call
         with (
             patch(
-                "authsome_mcp_proxy.external_oidc._setup_token_refresh_logging"
+                "authsome_mcp_proxy.desktop_auth._setup_token_refresh_logging"
             ) as mock_setup,
             patch(
-                "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
+                "authsome_mcp_proxy.desktop_auth.OIDCConfiguration.get_oidc_configuration"
             ) as mock_get_config,
         ):
             # Mock the OIDC config response
@@ -581,8 +581,8 @@ class TestTokenRefreshLogging:
             mock_oidc_config.token_endpoint = "https://auth.example.com/token"
             mock_get_config.return_value = mock_oidc_config
 
-            # Create ExternalOIDCAuth instance with custom cache dir
-            ExternalOIDCAuth(
+            # Create DesktopOIDCAuth instance with custom cache dir
+            DesktopOIDCAuth(
                 issuer_url="https://auth.example.com",
                 client_id="test-client",
                 token_storage_cache_dir=tmp_path / "cache",
@@ -623,7 +623,7 @@ class TestTokenRefresh:
         )
 
         # Set existing tokens with a refresh token
-        from authsome_mcp_proxy.external_oidc import OAuthToken
+        from authsome_mcp_proxy.desktop_auth import OAuthToken
 
         existing_tokens = OAuthToken(
             access_token="old-access-token",
@@ -643,16 +643,16 @@ class TestTokenRefresh:
         }
         mock_response.raise_for_status = Mock()
 
-        # Create ExternalOIDCAuth and test _refresh_tokens
+        # Create DesktopOIDCAuth and test _refresh_tokens
         with (
             patch(
-                "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
+                "authsome_mcp_proxy.desktop_auth.OIDCConfiguration.get_oidc_configuration"
             ) as mock_get_config,
             patch("httpx2.AsyncClient.post", return_value=mock_response),
         ):
             mock_get_config.return_value = mock_oidc_config
 
-            auth = ExternalOIDCAuth(
+            auth = DesktopOIDCAuth(
                 issuer_url="https://auth.example.com",
                 client_id="test-client",
             )
@@ -694,7 +694,7 @@ class TestTokenRefresh:
         )
 
         # Set existing tokens
-        from authsome_mcp_proxy.external_oidc import OAuthToken
+        from authsome_mcp_proxy.desktop_auth import OAuthToken
 
         existing_tokens = OAuthToken(
             access_token="old-access-token",
@@ -714,16 +714,16 @@ class TestTokenRefresh:
         }
         mock_response.raise_for_status = Mock()
 
-        # Create ExternalOIDCAuth and test _refresh_tokens
+        # Create DesktopOIDCAuth and test _refresh_tokens
         with (
             patch(
-                "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
+                "authsome_mcp_proxy.desktop_auth.OIDCConfiguration.get_oidc_configuration"
             ) as mock_get_config,
             patch("httpx2.AsyncClient.post", return_value=mock_response),
         ):
             mock_get_config.return_value = mock_oidc_config
 
-            auth = ExternalOIDCAuth(
+            auth = DesktopOIDCAuth(
                 issuer_url="https://auth.example.com",
                 client_id="test-client",
             )
@@ -765,7 +765,7 @@ class TestTokenRefresh:
         )
 
         # Set existing tokens
-        from authsome_mcp_proxy.external_oidc import OAuthToken
+        from authsome_mcp_proxy.desktop_auth import OAuthToken
 
         existing_tokens = OAuthToken(
             access_token="old-access-token",
@@ -786,16 +786,16 @@ class TestTokenRefresh:
         }
         mock_response.raise_for_status = Mock()
 
-        # Create ExternalOIDCAuth and test _refresh_tokens
+        # Create DesktopOIDCAuth and test _refresh_tokens
         with (
             patch(
-                "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
+                "authsome_mcp_proxy.desktop_auth.OIDCConfiguration.get_oidc_configuration"
             ) as mock_get_config,
             patch("httpx2.AsyncClient.post", return_value=mock_response),
         ):
             mock_get_config.return_value = mock_oidc_config
 
-            auth = ExternalOIDCAuth(
+            auth = DesktopOIDCAuth(
                 issuer_url="https://auth.example.com",
                 client_id="test-client",
             )
@@ -831,13 +831,13 @@ class TestTokenRefresh:
 
         # No tokens set - context.current_tokens is None
 
-        # Create ExternalOIDCAuth
+        # Create DesktopOIDCAuth
         with patch(
-            "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration"
+            "authsome_mcp_proxy.desktop_auth.OIDCConfiguration.get_oidc_configuration"
         ) as mock_get_config:
             mock_get_config.return_value = mock_oidc_config
 
-            auth = ExternalOIDCAuth(
+            auth = DesktopOIDCAuth(
                 issuer_url="https://auth.example.com",
                 client_id="test-client",
             )
@@ -861,7 +861,7 @@ class TestIssValidation:
     """
 
     @staticmethod
-    def _make_auth(tmp_path: Path, iss_supported: bool | None) -> ExternalOIDCAuth:
+    def _make_auth(tmp_path: Path, iss_supported: bool | None) -> DesktopOIDCAuth:
         oidc_config = _ExternalOIDCConfiguration(
             strict=False,
             issuer=ISSUER,
@@ -870,13 +870,13 @@ class TestIssValidation:
             authorization_response_iss_parameter_supported=iss_supported,
         )
         with (
-            patch("authsome_mcp_proxy.external_oidc._setup_token_refresh_logging"),
+            patch("authsome_mcp_proxy.desktop_auth._setup_token_refresh_logging"),
             patch(
-                "authsome_mcp_proxy.external_oidc.OIDCConfiguration.get_oidc_configuration",
+                "authsome_mcp_proxy.desktop_auth.OIDCConfiguration.get_oidc_configuration",
                 return_value=oidc_config,
             ),
         ):
-            auth = ExternalOIDCAuth(
+            auth = DesktopOIDCAuth(
                 issuer_url=ISSUER,
                 client_id="test-client",
                 token_storage_cache_dir=tmp_path / "cache",
@@ -886,7 +886,7 @@ class TestIssValidation:
 
     @staticmethod
     async def _run_flow(
-        auth: ExternalOIDCAuth, returned_iss: str | None
+        auth: DesktopOIDCAuth, returned_iss: str | None
     ) -> tuple[RuntimeError | None, Mock]:
         """Run the auth flow with a callback carrying `returned_iss`.
 
@@ -911,7 +911,7 @@ class TestIssValidation:
 
         with (
             patch(
-                "authsome_mcp_proxy.external_oidc.webbrowser.open",
+                "authsome_mcp_proxy.desktop_auth.webbrowser.open",
                 side_effect=opened_urls.append,
             ),
             patch.object(auth, "_run_callback_server", side_effect=callback),
@@ -1024,7 +1024,7 @@ class TestCallbackServer:
 
         with (
             patch(
-                "authsome_mcp_proxy.external_oidc.create_oauth_callback_server",
+                "authsome_mcp_proxy.desktop_auth.create_oauth_callback_server",
                 return_value=server,
             ),
             pytest.raises(BaseException) as exc_info,

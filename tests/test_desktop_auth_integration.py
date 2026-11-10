@@ -1,17 +1,17 @@
-"""Integration tests for authsome_mcp_proxy.external_oidc module."""
+"""Integration tests for authsome_mcp_proxy.desktop_auth module."""
 
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 from mcp.shared.auth import OAuthToken
 
-from authsome_mcp_proxy.external_oidc import ExternalOIDCAuth
+from authsome_mcp_proxy.desktop_auth import DesktopOIDCAuth
 
 
-class TestExternalOIDCAuthIntegration:
-    """Integration tests for ExternalOIDCAuth with mocked OIDC server."""
+class TestDesktopOIDCAuthIntegration:
+    """Integration tests for DesktopOIDCAuth with mocked OIDC server."""
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
     def test_initialization_fetches_oidc_config(self, mock_get):
         """Test that initialization fetches OIDC configuration from well-known endpoint."""
         # Mock the OIDC configuration endpoint response
@@ -27,7 +27,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com",
             client_id="test-client",
             client_secret="test-secret",
@@ -47,7 +47,7 @@ class TestExternalOIDCAuthIntegration:
         assert auth.context.client_secret == "test-secret"
         assert auth.context.scopes == ["openid", "profile", "email"]
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
     def test_initialization_with_list_scopes(self, mock_get):
         """Test initialization with scopes as a list."""
         mock_response = Mock()
@@ -62,7 +62,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com",
             client_id="test-client",
             scopes=["openid", "profile", "email", "custom_scope"],
@@ -70,7 +70,7 @@ class TestExternalOIDCAuthIntegration:
 
         assert auth.context.scopes == ["openid", "profile", "email", "custom_scope"]
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
     def test_initialization_with_custom_redirect_url(self, mock_get):
         """Test initialization with custom redirect URL."""
         mock_response = Mock()
@@ -85,7 +85,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com",
             client_id="test-client",
             redirect_url="http://localhost:9999/custom/callback",
@@ -93,7 +93,7 @@ class TestExternalOIDCAuthIntegration:
 
         assert auth.context.redirect_uri == "http://localhost:9999/custom/callback"
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
     async def test_initialize_loads_cached_tokens(self, mock_get):
         """Test that _initialize loads tokens from storage."""
         mock_response = Mock()
@@ -108,7 +108,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com", client_id="test-client"
         )
 
@@ -130,7 +130,7 @@ class TestExternalOIDCAuthIntegration:
             assert auth.context.current_tokens == mock_token
             assert auth.context.token_expiry_time is not None
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
     async def test_initialize_handles_no_cached_tokens(self, mock_get):
         """Test that _initialize handles missing cached tokens."""
         mock_response = Mock()
@@ -145,7 +145,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com", client_id="test-client"
         )
 
@@ -159,8 +159,8 @@ class TestExternalOIDCAuthIntegration:
             # Verify no tokens are set
             assert auth.context.current_tokens is None
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.AsyncClient")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.AsyncClient")
     async def test_refresh_tokens_success(self, mock_async_client, mock_get):
         """Test successful token refresh."""
         # Mock OIDC config
@@ -176,7 +176,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com",
             client_id="test-client",
             client_secret="test-secret",
@@ -220,7 +220,7 @@ class TestExternalOIDCAuthIntegration:
             # Verify storage was updated
             mock_set_tokens.assert_called_once()
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
     async def test_refresh_tokens_raises_without_refresh_token(self, mock_get):
         """Test that _refresh_tokens raises error when no refresh token available."""
         mock_response = Mock()
@@ -235,7 +235,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com", client_id="test-client"
         )
 
@@ -248,7 +248,7 @@ class TestExternalOIDCAuthIntegration:
         with pytest.raises(RuntimeError, match="No refresh token available"):
             await auth._refresh_tokens()
 
-    @patch("authsome_mcp_proxy.external_oidc.httpx2.get")
+    @patch("authsome_mcp_proxy.desktop_auth.httpx2.get")
     async def test_get_token_returns_cached_valid_token(self, mock_get):
         """Test that _get_token returns cached token if still valid."""
         mock_response = Mock()
@@ -263,7 +263,7 @@ class TestExternalOIDCAuthIntegration:
         }
         mock_get.return_value = mock_response
 
-        auth = ExternalOIDCAuth(
+        auth = DesktopOIDCAuth(
             issuer_url="https://auth.example.com", client_id="test-client"
         )
 
