@@ -106,7 +106,7 @@ MCP client                    proxy                       Upstream IdP / AS
                                                       user logs in    │
                                                                       │
                                   ◄── redirects browser
-                                  /callback?code=UPSTREAM_CODE   (a)
+                                  /auth/callback?code=UPSTREAM_CODE   (a)
                                   │
                           ┌───────┘
                           │
@@ -151,11 +151,11 @@ stitches together through the temporary `PROXY_CODE`.
 | 1 | MCP client → proxy: `POST /register` (DCR, RFC 7591) — **skipped by CIMD clients**, which send their document URL as `client_id` and let the proxy fetch it in step 2a | **DCR client record** — `{dcr_client_id, redirect_uris, scopes, …}`, registered as a public client (no secret). What the proxy looks up later to recognise this particular MCP client. Bridges DCR onto the proxy's single pre-registered upstream client. | **Client credentials** — the `dcr_client_id` the proxy just issued back. Reused on every future flow against this server. |
 | 2a | MCP client → proxy: `GET /authorize` | **Transaction state** — `{txn_id, state, code_challenge, redirect_uri, requested_scopes, dcr_client_id, …}`. Short-lived; consumed in step 3. | *(in-memory PKCE verifier only — not on disk)* |
 | 2b | proxy → upstream IdP: `GET /authorize` (via browser redirect) | *(no new persistent record — the transaction state from 2a is updated with the upstream-side `state` value)* | *(nothing — browser only)* |
-| 3a | upstream IdP → proxy: `GET /callback?code=UPSTREAM_CODE` (via browser redirect) | **Transient** — upstream auth code held in memory until 3b completes. | *(nothing — the browser is currently on the proxy's domain)* |
+| 3a | upstream IdP → proxy: `GET /auth/callback?code=UPSTREAM_CODE` (via browser redirect) | **Transient** — upstream auth code held in memory until 3b completes. | *(nothing — the browser is currently on the proxy's domain)* |
 | 3b | proxy → upstream IdP: `POST /token` (server-to-server) | **Upstream tokens received** — the proxy authenticates with its own upstream `client_secret` (loaded from env). Receives the real upstream `access_token` + `refresh_token`. Stores them, short-lived, indexed by a freshly-generated `PROXY_CODE`. | *(nothing — server-to-server call)* |
 | 3c | proxy → MCP client: redirect browser to `<mcp-client-redirect>?code=PROXY_CODE` | *(no new record — `PROXY_CODE` was created in 3b)* | *(nothing yet — the local callback handler is about to fire)* |
 | 3d | MCP client → proxy: `POST /token` (PKCE, no secret) | Proxy verifies `code_verifier` against the `code_challenge` from step 2a and deletes `PROXY_CODE`. It moves the upstream tokens into the **upstream token store** (kept until the longest-lived token expires), issues its own access and refresh token — JWTs signed with the proxy's signing key, each carrying a random `jti` — and stores a **`jti` → upstream token mapping** for each, plus **refresh-token metadata** keyed by a hash of the refresh token. | **Proxy-issued access token + refresh token** — not the upstream IdP's. The MCP client puts the access token in `Authorization: Bearer …` on every subsequent JSON-RPC frame; when it expires, it calls `/token` again with `grant_type=refresh_token`. |
-| 4 | MCP client → proxy: `POST /mcp` (every JSON-RPC frame) | Proxy verifies the bearer's signature with its signing key, **looks up the upstream token** through the `jti` mapping, and validates that upstream token against the IdP (JWKS, cached in memory), refreshing it upstream first if it is about to expire. A bearer whose mapping is gone is rejected as invalid. In `OUTBOUND_AUTH=forward` the **upstream** token is what goes to the upstream MCP server. | *(no change — reuses the cached access token; silently runs the `/token` refresh dance when expired)* |
+| 4 | MCP client → proxy: `POST /mcp` (every JSON-RPC frame) | Proxy verifies the bearer's signature with its signing key, **looks up the upstream token** through the `jti` mapping, and validates that upstream token against the IdP — locally against its JWKS, cached in memory, or, for Google, whose access tokens are opaque, with a call to Google over one pooled connection — refreshing it upstream first if it is about to expire. A bearer whose mapping is gone is rejected as invalid. In `OUTBOUND_AUTH=forward` the **upstream** token is what goes to the upstream MCP server. | *(no change — reuses the cached access token; silently runs the `/token` refresh dance when expired)* |
 
 ### Where the client-side record lives (per client)
 
@@ -175,7 +175,7 @@ is talking to it.
 |---|---|
 | Confidential client with `client_secret` — calls `/token` from its callback handler | **The proxy.** The proxy is the upstream IdP's registered confidential client. The upstream `client_secret` lives in the proxy's env vars only. Used in step **3b**. |
 | Public client with PKCE — calls `/token` from its local callback | **The MCP client.** It's a DCR'd public client of the proxy. No secret; PKCE binds the `/token` call to the `/authorize` call. Used in step **3d**. |
-| `/callback` endpoint | Two different ones: **the proxy's `/callback`** (where the upstream IdP redirects, step 3a) and **the MCP client's redirect URI** (where the proxy redirects, step 3c — e.g. `http://localhost:XXXX/oauth/callback` for `mcp-remote`, Anthropic-hosted for Claude.ai/Cowork). |
+| `/callback` endpoint | Two different ones: **the proxy's `/auth/callback`** (where the upstream IdP redirects, step 3a) and **the MCP client's redirect URI** (where the proxy redirects, step 3c — e.g. `http://localhost:XXXX/oauth/callback` for `mcp-remote`, Anthropic-hosted for Claude.ai/Cowork). |
 | Authorization code | Two different ones: **`UPSTREAM_CODE`** (upstream-IdP-issued, consumed by the proxy in 3b) and **`PROXY_CODE`** (proxy-issued, consumed by the MCP client in 3d). |
 
 ### What persists, what doesn't
@@ -265,7 +265,9 @@ the proxy** — they share a process tree and trust each other locally.
 The proxy wears only **one OAuth 2.0 hat** here: it is an **OAuth 2.0
 client** of the upstream IdP, doing the classical Authorization Code +
 PKCE flow on behalf of the single local user. No DCR, no AS surface, no
-two-flow stitching. Just one client, one flow, one user.
+two-flow stitching. Just one client, one flow, one user. The code is
+`DesktopOIDCAuth` in `src/authsome_mcp_proxy/desktop_auth.py`; web mode
+never uses it.
 
 This requires the user to have pre-registered an OAuth client with the
 upstream IdP themselves (the proxy is *that* client) and to supply the
@@ -286,11 +288,12 @@ Browser                  MCP client                   proxy                Upstr
                                 │ JSON-RPC over stdio │
                                 │ ◄──────────────────►│
                                 │                     │
-                                │                     │ first upstream call needs auth
+                                │                     │ at startup, relaying the upstream's
+                                │                     │ identity is the first call needing auth
                                 │                     │
                                 │                     │ start tiny HTTP listener on
                                 │                     │ OIDC_REDIRECT_URL (e.g.
-                                │                     │ http://localhost:8080/callback)
+                                │                     │ http://localhost:8080/auth/callback)
                                 │                     │
                                 │                     │ /authorize?…&code_challenge=…
                                 │                     │ ──────────────────────────────►
@@ -301,10 +304,11 @@ Browser                  MCP client                   proxy                Upstr
         │ user logs in          │                     │                                       
         │ ─────────────────────────────────────────────────►
         │                       │                     │                                       
-        │ ◄─ redirect to localhost:8080/callback?code=UPSTREAM_CODE
+        │ ◄─ redirect to localhost:8080/auth/callback?code=UPSTREAM_CODE&iss=…
         │                       │                     │
         │                       │                     │ captures UPSTREAM_CODE from
-        │                       │                     │ its own localhost listener
+        │                       │                     │ its own localhost listener,
+        │                       │                     │ checks state and iss
         │                       │                     │
         │                       │                     │ /token (PKCE — no client_secret
         │                       │                     │  if public client; client_secret
@@ -317,28 +321,29 @@ Browser                  MCP client                   proxy                Upstr
         │                       │                     │
                                 │                     │ tools/prompts/resources
                                 │                     │ ───────────────────────────────────────────►
-                                │                     │   Authorization: Bearer <upstream JWT>
+                                │                     │   Authorization: Bearer <upstream access token>
                                 │ ◄─── result ────────│ ◄───────────────────────────────────────────
 ```
 
 After first successful login the browser dance only repeats when the
 refresh token expires; ordinary token rotation happens silently via
-`grant_type=refresh_token` against the upstream IdP.
+`grant_type=refresh_token` against the upstream IdP, 60 seconds before
+the access token expires or when the upstream MCP server answers 401.
 
 ### Detailed step-by-step
 
 | # | Event | Where it happens | Persistent record |
 |---|---|---|---|
-| 1 | MCP client launches the proxy as a stdio subprocess | Local machine | Proxy reads `OIDC_*` env vars into memory. Nothing on disk yet. |
-| 2 | First MCP method invocation (tools/list, etc.) arrives over stdio | Proxy ↔ MCP client | None |
-| 3 | Proxy needs to call the upstream MCP server; checks `~/.cache/authsome-mcp-proxy-<version>/` for a cached token | Proxy's local user home | Reads the cache if present and not expired. |
-| 4a | No valid cached token: proxy starts an HTTP listener on `OIDC_REDIRECT_URL` (e.g. `http://localhost:8080/callback`) and constructs the upstream `/authorize` URL (`response_type=code`, `code_challenge`, PKCE, requested scopes) | Local | None — PKCE verifier held in memory |
+| 1 | MCP client launches the proxy as a stdio subprocess | Local machine | Proxy reads `OIDC_*` env vars into memory, fetches the IdP's discovery document and checks that its `issuer` matches `OIDC_ISSUER_URL` (a trailing slash aside); a mismatch stops the proxy. Nothing on disk yet. |
+| 2 | Before serving stdio, the proxy connects to the upstream MCP server once to relay its name, version and instructions to the MCP client. That is the first upstream call, so sign-in happens at launch, not at the first tool call. | Proxy ↔ upstream MCP | None |
+| 3 | Proxy checks `~/.cache/authsome-mcp-proxy-<version>/` for a cached token | Proxy's local user home | Reads the cache if present and not expired. |
+| 4a | No valid cached token: proxy starts an HTTP listener on `OIDC_REDIRECT_URL` (default `http://localhost:8080/auth/callback`) and constructs the upstream `/authorize` URL (`response_type=code`, `code_challenge`, PKCE, requested scopes) | Local | None — PKCE verifier held in memory |
 | 4b | Proxy opens the user's default browser to the upstream `/authorize` URL | Local | None |
-| 4c | User logs in at the upstream IdP in the browser | Browser ↔ upstream IdP | Upstream issues an auth code, redirects browser back to `http://localhost:8080/callback?code=UPSTREAM_CODE` |
-| 4d | Proxy's local listener captures `UPSTREAM_CODE` | Local | None |
+| 4c | User logs in at the upstream IdP in the browser | Browser ↔ upstream IdP | Upstream issues an auth code, redirects browser back to `http://localhost:8080/auth/callback?code=UPSTREAM_CODE` |
+| 4d | Proxy's local listener captures `UPSTREAM_CODE` and checks `state` and the RFC 9207 `iss` parameter against the IdP's issuer; a mismatch, or no `iss` from an IdP that advertises sending it, aborts before the code is redeemed. The login must complete within 30 seconds. | Local | None |
 | 4e | Proxy calls upstream `/token` server-to-server with `code`, PKCE `code_verifier`, and the proxy's `client_id` (+ `client_secret` if confidential) | Proxy ↔ upstream IdP | Receives `access_token` + `refresh_token`; **writes them to `~/.cache/authsome-mcp-proxy-<version>/`** |
 | 5 | Proxy attaches `Authorization: Bearer <access_token>` and forwards the MCP call to the upstream MCP server | Proxy ↔ upstream MCP | None |
-| 6 | Subsequent MCP calls reuse the cached access token. When it expires, proxy silently runs `grant_type=refresh_token` against the upstream IdP and updates the cache. | Proxy ↔ upstream IdP | Updated tokens written to the same cache file. |
+| 6 | Subsequent MCP calls reuse the cached access token. Within 60 seconds of its expiry, or when the upstream MCP server answers 401, proxy silently runs `grant_type=refresh_token` against the upstream IdP and updates the cache. | Proxy ↔ upstream IdP | Updated tokens written to the same cache. |
 | 7 | If the refresh token also expires (or is revoked), proxy falls back to the browser flow (steps 4a–4e) on the next outbound call. | Local | Cache overwritten with fresh tokens. |
 
 ### Where the cache lives
@@ -347,12 +352,14 @@ The proxy stores upstream-IdP tokens locally for the user who owns the
 process:
 
 ```
-${XDG_CACHE_HOME:-$HOME/.cache}/authsome-mcp-proxy-<version>/
+~/.cache/authsome-mcp-proxy-<version>/
 ```
 
-On Windows this resolves under `%LOCALAPPDATA%` or `%USERPROFILE%\.cache\`
-depending on environment. The directory is namespaced by package version
-so a re-install doesn't accidentally reuse incompatible cached state.
+`~` is the user's home directory on every platform (`%USERPROFILE%` on
+Windows); `XDG_CACHE_HOME` is not consulted. The directory is namespaced
+by package version, so an upgrade starts with an empty cache and signs in
+once more rather than reusing state from another version. Development
+builds share `authsome-mcp-proxy-dev/`.
 
 This cache has nothing to do with the web-mode `${FASTMCP_HOME}/oauth-proxy/`
 directory — desktop mode never runs the DCR-bridge code path.
@@ -363,7 +370,7 @@ directory — desktop mode never runs the DCR-bridge code path.
 |---|---|
 | OAuth client | **The proxy.** Single client to the upstream IdP. |
 | `client_id` / `client_secret` | In the proxy's env vars (`OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`) — the user pre-registers a client with the upstream IdP and supplies the credentials to the proxy. |
-| `/callback` endpoint | **The proxy's localhost listener** at `OIDC_REDIRECT_URL` (default `http://localhost:8080/callback`). The MCP client has no callback — it doesn't speak OAuth. |
+| `/callback` endpoint | **The proxy's localhost listener** at `OIDC_REDIRECT_URL` (default `http://localhost:8080/auth/callback`). The MCP client has no callback — it doesn't speak OAuth. |
 | Authorization code | A single `UPSTREAM_CODE` from the upstream IdP, consumed once in step 4e. No `PROXY_CODE` exists in desktop mode. |
 | Token storage | On the user's filesystem (`~/.cache/authsome-mcp-proxy-<version>/`). |
 
@@ -373,10 +380,17 @@ directory — desktop mode never runs the DCR-bridge code path.
   browser flow. No data loss; the user just sees a browser popup.
 - **Refresh token expired or revoked** → same recovery: browser flow on
   the next outbound call.
-- **`OIDC_REDIRECT_URL` port in use** → flow fails to capture the
-  callback. Set a different port via `--oidc-redirect-url
-  http://localhost:<other-port>/callback` (and make sure the same URL
-  is whitelisted in the upstream IdP's app-client config).
+- **`OIDC_REDIRECT_URL` port in use** → the sign-in fails with
+  `OIDC Auth callback server could not start on <url>; is the port
+  already in use?`. Set a different port via `--oidc-redirect-url
+  http://localhost:<other-port>/auth/callback` (and make sure the same
+  URL is whitelisted in the upstream IdP's app-client config).
+- **Login not completed within 30 seconds** → the sign-in times out.
+  Since it runs at launch, the proxy does not start; the MCP client
+  shows it as failed, and relaunching it opens the browser again.
+- **Discovery `issuer` differs from `OIDC_ISSUER_URL`** → the proxy
+  refuses to start and names both values. Set `OIDC_ISSUER_URL` to the
+  issuer the IdP publishes; only a trailing slash may differ.
 - **`OIDC_REDIRECT_URL` mismatch with the upstream IdP's whitelisted
   callbacks** → upstream rejects the `/authorize` request before
   redirecting back. This is the most common misconfiguration in desktop
