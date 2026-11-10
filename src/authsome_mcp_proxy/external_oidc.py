@@ -222,9 +222,10 @@ class ExternalOIDCAuth(httpx2.Auth):
     Example:
         ```python
         from fastmcp.client import Client
-        from fastmcp.client.auth import OIDCAuth
 
-        auth = OIDCAuth(
+        from authsome_mcp_proxy.external_oidc import ExternalOIDCAuth
+
+        auth = ExternalOIDCAuth(
             issuer_url="https://your-keycloak.example.com/realms/myrealm",
             client_id="your-client-id",
             client_secret="your-client-secret",
@@ -388,9 +389,19 @@ class ExternalOIDCAuth(httpx2.Auth):
             result_ready=result_ready,
         )
 
+        async def serve() -> None:
+            try:
+                await server.serve()
+            except SystemExit as exc:
+                # uvicorn exits the process when it cannot bind its port
+                raise OSError(
+                    "OIDC Auth callback server could not start on "
+                    f"{self.context.redirect_uri}; is the port already in use?"
+                ) from exc
+
         # Run server until response is received with timeout logic
         async with anyio.create_task_group() as tg:
-            tg.start_soon(server.serve)
+            tg.start_soon(serve)
             logger.info(
                 f"OIDC Auth callback server started on {self.context.redirect_uri}"
             )

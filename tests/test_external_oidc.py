@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from exceptiongroup import BaseExceptionGroup
 
 from authsome_mcp_proxy.external_oidc import (
     ExternalOIDCAuth,
@@ -1009,3 +1010,30 @@ class TestIssValidation:
         assert error is None
         token_post.assert_called_once()
         assert auth.context.get_access_token() == "access-token"
+
+
+class TestCallbackServer:
+    """Test starting the local OAuth callback server."""
+
+    async def test_unbindable_port_raises_oserror(self, tmp_path: Path):
+        """uvicorn calls sys.exit when the redirect port is taken; that must
+        surface as an OSError naming the redirect URI, not end the process."""
+        auth = TestIssValidation._make_auth(tmp_path, iss_supported=None)
+        server = Mock()
+        server.serve = AsyncMock(side_effect=SystemExit(1))
+
+        with (
+            patch(
+                "authsome_mcp_proxy.external_oidc.create_oauth_callback_server",
+                return_value=server,
+            ),
+            pytest.raises(BaseException) as exc_info,
+        ):
+            await auth._run_callback_server()
+
+        error = exc_info.value
+        while isinstance(error, BaseExceptionGroup) and len(error.exceptions) == 1:
+            error = error.exceptions[0]
+        assert isinstance(error, OSError)
+        assert auth.context.redirect_uri in str(error)
+        assert isinstance(error.__cause__, SystemExit)
