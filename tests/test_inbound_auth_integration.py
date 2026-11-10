@@ -42,6 +42,7 @@ def _oidc_configuration() -> OIDCConfiguration:
         authorization_endpoint=f"{ISSUER}/authorize",
         token_endpoint=f"{ISSUER}/token",
         jwks_uri=f"{ISSUER}/jwks",
+        introspection_endpoint=f"{ISSUER}/introspect",
         response_types_supported=["code"],
         subject_types_supported=["public"],
         id_token_signing_alg_values_supported=["RS256"],
@@ -68,6 +69,18 @@ def _cognito_config(*, enable_cimd: bool) -> WebConfig:
         client_secret="csec",
         cognito_user_pool_id="eu-central-1_abc",
         cognito_aws_region="eu-central-1",
+        scopes="openid",
+        enable_cimd=enable_cimd,
+    )
+
+
+def _zitadel_config(*, enable_cimd: bool) -> WebConfig:
+    return WebConfig(
+        inbound_auth_provider="zitadel",
+        proxy_base_url=BASE_URL,
+        client_id="cid",
+        client_secret="csec",
+        zitadel_domain=ISSUER,
         scopes="openid",
         enable_cimd=enable_cimd,
     )
@@ -128,6 +141,21 @@ async def test_cognito_switch_reaches_the_metadata_too(enable_cimd):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("enable_cimd", [True, False])
+async def test_zitadel_switch_reaches_the_metadata_too(enable_cimd):
+    """The vendored ZITADEL provider is built for real here, so this also
+    proves the keywords :func:`build_inbound_auth` passes match its signature
+    on the fastmcp release in use."""
+    metadata = await _metadata(
+        _app(enable_cimd=enable_cimd, config=_zitadel_config(enable_cimd=enable_cimd))
+    )
+
+    assert metadata.get("client_id_metadata_document_supported") is (
+        True if enable_cimd else None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("enable_cimd", [True, False])
 async def test_dcr_stays_available_either_way(enable_cimd):
     """CIMD is additive. Whichever way the switch is thrown, clients that
     register dynamically must still find a registration endpoint."""
@@ -137,7 +165,9 @@ async def test_dcr_stays_available_either_way(enable_cimd):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("build_config", [_oidc_config, _cognito_config])
+@pytest.mark.parametrize(
+    "build_config", [_oidc_config, _cognito_config, _zitadel_config]
+)
 async def test_cimd_advertises_public_client_token_auth(build_config):
     """Advertising CIMD is not on its own enough to get a client to use it.
 

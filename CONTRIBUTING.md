@@ -431,7 +431,7 @@ To ensure users get compatible dependency versions when running `uvx authsome-mc
 
 ```toml
 dependencies = [
-    "fastmcp>=4.0.8",
+    "fastmcp>=4.1.0,<5",
     "py-key-value-aio[disk]>=0.3.0",  # Explicitly requires disk extra
 ]
 ```

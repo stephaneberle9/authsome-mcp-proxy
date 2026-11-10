@@ -38,6 +38,7 @@ The proxy can run as:
   - [AWS Cognito](#aws-cognito)
   - [Google](#google)
   - [Azure (Entra ID)](#azure-entra-id)
+  - [ZITADEL](#zitadel)
   - [Connecting downstream MCP clients](#connecting-downstream-mcp-clients)
   - [Identity advertised to downstream clients](#identity-advertised-to-downstream-clients)
   - [Surviving restarts](#surviving-restarts)
@@ -80,7 +81,7 @@ The proxy fills these gaps by:
 
 1. **Inbound** — terminating the standard MCP auth handshake against an
    IdP the operator configures (Keycloak, OIDC, AWS Cognito, Google,
-   Azure), so downstream MCP clients can perform Dynamic Client
+   Azure, ZITADEL), so downstream MCP clients can perform Dynamic Client
    Registration and the OAuth code flow without modifying the upstream;
    and
 
@@ -294,6 +295,51 @@ and prefixed with `--azure-identifier-uri` automatically before being sent
 to Azure (`api://mcp-server/User.Read`), and the tenant ID is required
 because the issuer URL embeds it.
 
+## ZITADEL
+
+```bash
+uvx authsome-mcp-proxy \
+  --transport http \
+  --port 8000 \
+  --proxy-base-url https://mcp.example.com \
+  --inbound-auth-provider zitadel \
+  --zitadel-domain my-instance-abc123.zitadel.cloud \
+  --oidc-client-id <zitadel-app-client-id> \
+  --oidc-client-secret <zitadel-app-client-secret> \
+  --oidc-scopes "openid profile email offline_access" \
+  https://mcp-upstream.example.com/mcp
+```
+
+In the [ZITADEL](https://zitadel.com) Console (ZITADEL Cloud or
+self-hosted), create a dedicated project for the MCP server, since
+ZITADEL scopes token audiences to a whole project. Add a **Web**
+application to it with the authentication method **Code** (the client
+secret is sent with HTTP Basic) and `{proxy-base-url}/auth/callback` as
+redirect URI. ZITADEL accepts `http://` redirect URIs only with the
+application's *Development Mode* switched on. Copy the client secret
+right away; ZITADEL shows it only once.
+
+`--zitadel-domain` takes a bare host, which defaults to HTTPS, or a full
+URL such as `http://localhost:8080` for a local instance. The client
+secret is required: the proxy validates every ZITADEL access token,
+opaque or JWT, through ZITADEL's token introspection endpoint, and
+authenticates to it with that secret. Revoked tokens and deactivated
+users are therefore rejected on the next request. Tokens issued to
+another application of the same project are rejected as well.
+
+For refresh tokens, open the application's *OIDC Settings*, tick the
+**Refresh Token** grant type next to *Authorization Code*, and request
+`offline_access` as shown above. Without that grant, leave
+`offline_access` out of `--oidc-scopes`. With no `--oidc-scopes` at
+all, the proxy requests `openid` only.
+
+> [!NOTE]
+> No FastMCP release ships a ZITADEL provider yet. The proxy carries a
+> copy of the one proposed upstream in
+> [PrefectHQ/fastmcp#6392](https://github.com/PrefectHQ/fastmcp/pull/6392)
+> until one does, so the setup above is the same as it will be with
+> FastMCP's own.
+
 ## Connecting downstream MCP clients
 
 Once the proxy is running on `https://mcp.example.com:8000/mcp`:
@@ -348,7 +394,7 @@ acting as the authorization server:
 
 | `--inbound-auth-provider` | CIMD |
 |---|---|
-| `oidc`, `google`, `azure`, `aws-cognito` | ✅ the proxy is the authorization server, and handles CIMD itself |
+| `oidc`, `google`, `azure`, `aws-cognito`, `zitadel` | ✅ the proxy is the authorization server, and handles CIMD itself |
 | `keycloak` | ⚠️ not the proxy's call — clients register directly with Keycloak, so CIMD works only if your Keycloak does. `ENABLE_CIMD` is inert here. |
 
 > [!IMPORTANT]
@@ -795,16 +841,17 @@ needs):
 
 | Env var | CLI flag | Description |
 |---|---|---|
-| `INBOUND_AUTH_PROVIDER` | `--inbound-auth-provider {oidc,keycloak,aws-cognito,google,azure}` | Which provider class to use. |
+| `INBOUND_AUTH_PROVIDER` | `--inbound-auth-provider {oidc,keycloak,aws-cognito,google,azure,zitadel}` | Which provider class to use. |
 | `OIDC_ISSUER_URL` | `--oidc-issuer-url` | OIDC issuer / Keycloak realm URL. |
 | `OIDC_CLIENT_ID` | `--oidc-client-id` | OAuth client ID at the IdP. |
-| `OIDC_CLIENT_SECRET` | `--oidc-client-secret` | OAuth client secret (required for `aws-cognito`; optional for `oidc`/`google`/`azure`; unused for `keycloak`). |
+| `OIDC_CLIENT_SECRET` | `--oidc-client-secret` | OAuth client secret (required for `aws-cognito` and `zitadel`; optional for `oidc`/`google`/`azure`; unused for `keycloak`). |
 | `OIDC_SCOPES` | `--oidc-scopes` | Space-separated scopes. |
 | `AUDIENCE` | `--audience` | JWT `aud` claim to require (oidc/keycloak; recommended for production). |
 | `COGNITO_USER_POOL_ID` | `--cognito-user-pool-id` | AWS Cognito user pool ID. |
 | `COGNITO_AWS_REGION` | `--cognito-aws-region` | AWS region for the Cognito user pool. |
 | `AZURE_TENANT_ID` | `--azure-tenant-id` | Azure AD tenant ID. |
 | `AZURE_IDENTIFIER_URI` | `--azure-identifier-uri` | Azure Application ID URI used for scope prefixing. |
+| `ZITADEL_DOMAIN` | `--zitadel-domain` | ZITADEL instance domain (bare host, defaults to HTTPS) or full URL. |
 | `ENABLE_CIMD` | `--enable-cimd` / `--no-enable-cimd` | Accept Client ID Metadata Documents from downstream clients. On by default — see [Client ID Metadata Documents (CIMD)](#client-id-metadata-documents-cimd). |
 
 **OAuth proxy state** (http mode, inert for `keycloak` — see

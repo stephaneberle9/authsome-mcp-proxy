@@ -48,7 +48,7 @@ class TestPublishedDependencyConstraints:
         """
         specifier = _constraint("fastmcp").specifier
         assert not specifier.contains("3.4.7")
-        assert specifier.contains("4.0.8")
+        assert specifier.contains("4.1.0")
 
     def test_fastmcp_before_4_0_8_is_excluded(self):
         """4.0.8 is the first release with all the OAuthProxy security fixes.
@@ -60,6 +60,17 @@ class TestPublishedDependencyConstraints:
         """
         specifier = _constraint("fastmcp").specifier
         assert not specifier.contains("4.0.7")
+
+    def test_fastmcp_before_4_1_0_is_excluded(self):
+        """The vendored ZITADEL provider needs 4.1.0.
+
+        It binds introspected tokens to the proxy's client ID through
+        ``IntrospectionTokenVerifier(audience=...)``, which fastmcp 4.1.0
+        added; on 4.0.x, building the provider raises ``TypeError``.
+        """
+        specifier = _constraint("fastmcp").specifier
+        assert not specifier.contains("4.0.10")
+        assert specifier.contains("4.1.0")
 
     def test_fastmcp_5_is_excluded(self):
         """Web mode depends on fastmcp's private ``_lifespan_manager``.

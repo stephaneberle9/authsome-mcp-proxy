@@ -12,9 +12,9 @@ This module provides the CLI entry point for running the MCP proxy server. It:
 CLI flags fall back to matching environment variables (CLI arguments take
 precedence). For stdio mode the ``OIDC_*`` env vars apply; for http mode
 the inbound provider params (``OIDC_*``, ``COGNITO_*``, ``AZURE_*``,
-``--audience``, ``--proxy-base-url``, ``ENABLE_CIMD``), the OAuth proxy state
-params (``JWT_SIGNING_KEY``, ``STORE_*``) and the outbound mode params
-(``OUTBOUND_*``) apply.
+``ZITADEL_*``, ``--audience``, ``--proxy-base-url``, ``ENABLE_CIMD``), the
+OAuth proxy state params (``JWT_SIGNING_KEY``, ``STORE_*``) and the outbound
+mode params (``OUTBOUND_*``) apply.
 """
 
 import argparse
@@ -35,7 +35,14 @@ from .config import DesktopConfig, ProxyConfig, WebConfig
 logger = logging.getLogger(__name__)
 
 
-_INBOUND_AUTH_PROVIDERS = ("oidc", "keycloak", "aws-cognito", "google", "azure")
+_INBOUND_AUTH_PROVIDERS = (
+    "oidc",
+    "keycloak",
+    "aws-cognito",
+    "google",
+    "azure",
+    "zitadel",
+)
 _OUTBOUND_AUTH_MODES = ("forward", "oauth-client-credentials", "static")
 _STORE_BACKENDS: tuple[str, ...] = get_args(StoreBackend)
 
@@ -130,8 +137,8 @@ def cli() -> argparse.Namespace:
     # - stdio: the desktop OAuth client (issuer/client/scopes/redirect)
     # - http: the FastMCP inbound provider when --inbound-auth-provider is
     #   'oidc'/'keycloak' (issuer_url), or as the OAuth client_id/secret
-    #   common across 'oidc'/'aws-cognito'/'google'/'azure' (unused for
-    #   'keycloak' which is a RemoteAuthProvider).
+    #   common across 'oidc'/'aws-cognito'/'google'/'azure'/'zitadel'
+    #   (unused for 'keycloak' which is a RemoteAuthProvider).
     parser.add_argument(
         "--oidc-issuer-url",
         help="OIDC issuer / Keycloak realm URL "
@@ -167,7 +174,7 @@ def cli() -> argparse.Namespace:
         "KeycloakAuthProvider (RemoteAuthProvider -- Keycloak >= 26.6.0 with "
         "native DCR). 'oidc' uses OIDCProxy in DCR-bridge mode for any "
         "generic OIDC IdP (including older Keycloak). 'aws-cognito', "
-        "'google', 'azure' use the matching IdP-specific FastMCP providers. "
+        "'google', 'azure', 'zitadel' use the matching IdP-specific providers. "
         "Can also be set via INBOUND_AUTH_PROVIDER env var.",
     )
     parser.add_argument(
@@ -214,6 +221,14 @@ def cli() -> argparse.Namespace:
         default=None,
         help="Azure Application ID URI used for scope prefixing -- optional for "
         "--inbound-auth-provider azure (can also be set via AZURE_IDENTIFIER_URI env var)",
+    )
+    parser.add_argument(
+        "--zitadel-domain",
+        default=None,
+        help="ZITADEL instance domain, e.g. 'my-instance-abc123.zitadel.cloud' "
+        "(defaults to HTTPS) or a full URL such as 'http://localhost:8080' -- "
+        "required for --inbound-auth-provider zitadel "
+        "(can also be set via ZITADEL_DOMAIN env var)",
     )
     parser.add_argument(
         "--enable-cimd",
@@ -392,6 +407,7 @@ def _apply_env_fallbacks(args: argparse.Namespace) -> None:
         ("cognito_aws_region", "COGNITO_AWS_REGION"),
         ("azure_tenant_id", "AZURE_TENANT_ID"),
         ("azure_identifier_uri", "AZURE_IDENTIFIER_URI"),
+        ("zitadel_domain", "ZITADEL_DOMAIN"),
         ("jwt_signing_key", "JWT_SIGNING_KEY"),
         ("store_backend", "STORE_BACKEND"),
         ("store_dynamodb_table", "STORE_DYNAMODB_TABLE"),
@@ -513,6 +529,7 @@ def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
         cognito_aws_region=args.cognito_aws_region,
         azure_tenant_id=args.azure_tenant_id,
         azure_identifier_uri=args.azure_identifier_uri,
+        zitadel_domain=args.zitadel_domain,
         jwt_signing_key=args.jwt_signing_key,
         store_backend=_store_backend(args.store_backend),
         store_dynamodb_table=args.store_dynamodb_table,

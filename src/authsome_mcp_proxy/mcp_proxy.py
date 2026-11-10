@@ -191,8 +191,8 @@ async def _serve_http(
     startup rather than at the first sign-in.
 
     One HTTP client serves every hostname too, for the providers that verify
-    each inbound token with a call to the IdP (``google``); it is closed when
-    serving stops.
+    each inbound token with a call to the IdP (``google``, ``zitadel``); it is
+    closed when serving stops.
     """
     oauth_state = config.oauth_state
     client_storage = (

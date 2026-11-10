@@ -1,5 +1,7 @@
 """Tests for authsome_mcp_proxy.config module."""
 
+from typing import Any
+
 import pytest
 
 from authsome_mcp_proxy.config import DesktopConfig, WebConfig
@@ -157,6 +159,37 @@ class TestWebConfigInbound:
             scopes="user.read",
         )
         assert config.azure_tenant_id == "tid"
+
+    @pytest.mark.parametrize(
+        "missing", ["client_id", "client_secret", "zitadel_domain"]
+    )
+    def test_zitadel_requires_client_credentials_and_domain(self, missing):
+        # The secret is mandatory, unlike for google/azure: it also authenticates
+        # the proxy to ZITADEL's introspection endpoint, which verifies every
+        # inbound token.
+        fields: dict[str, Any] = {
+            "client_id": "cid",
+            "client_secret": "csec",
+            "zitadel_domain": "my-instance-abc123.zitadel.cloud",
+        }
+        del fields[missing]
+        with pytest.raises(ValueError, match=f"zitadel.*{missing}"):
+            WebConfig(
+                inbound_auth_provider="zitadel",
+                proxy_base_url="https://mcp.example.com",
+                **fields,
+            )
+
+    def test_zitadel_happy_path(self):
+        config = WebConfig(
+            inbound_auth_provider="zitadel",
+            proxy_base_url="https://mcp.example.com",
+            client_id="cid",
+            client_secret="csec",
+            zitadel_domain="my-instance-abc123.zitadel.cloud",
+        )
+        assert config.zitadel_domain == "my-instance-abc123.zitadel.cloud"
+        assert config.oauth_state is not None
 
 
 class TestWebConfigStore:

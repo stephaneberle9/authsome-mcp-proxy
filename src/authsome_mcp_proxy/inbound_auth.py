@@ -4,7 +4,9 @@ This module dispatches ``WebConfig.inbound_auth_provider`` to the matching FastM
 auth provider class. The proxy itself stays IdP-agnostic -- per-IdP quirks
 (Cognito's ``client_id`` claim validation, Azure's scope prefixing, Google's
 opaque-token handling, Keycloak's native DCR support, etc.) live inside
-the FastMCP provider classes.
+the FastMCP provider classes -- or, for ZITADEL, in the provider vendored from
+FastMCP in :mod:`authsome_mcp_proxy.zitadel_provider` until a FastMCP release
+ships it.
 
 Two patterns are dispatched here:
 
@@ -12,10 +14,10 @@ Two patterns are dispatched here:
   modern Keycloak supports MCP-compatible DCR natively, so the proxy holds
   no IdP credentials and downstream MCP clients register directly with
   Keycloak. Lean, but requires Keycloak >= 26.6.0.
-- ``oidc`` / ``aws-cognito`` / ``google`` / ``azure`` use ``OIDCProxy`` (or
-  one of its IdP-specific subclasses) in DCR-bridge mode: the proxy holds a
-  pre-registered static client with the IdP and bridges downstream MCP
-  clients' DCR requests to that IdP's static-client model. Use ``oidc`` as
+- ``oidc`` / ``aws-cognito`` / ``google`` / ``azure`` / ``zitadel`` use
+  ``OIDCProxy`` (or one of its IdP-specific subclasses) in DCR-bridge mode:
+  the proxy holds a pre-registered static client with the IdP and bridges
+  downstream MCP clients' DCR requests to that IdP's static-client model. Use ``oidc`` as
   the generic fallback for any OIDC IdP that doesn't support DCR natively
   (including older Keycloak).
 
@@ -32,10 +34,12 @@ key-value store. ``WebConfig.oauth_state`` turns the settings into
 fastmcp-seaworthy's ``OAuthStateSettings``; its ``build_client_storage`` builds
 the store and ``provider_kwargs`` hands both to the provider.
 
-The ``google`` branch also takes a shared HTTP client. Google's access tokens
-are opaque, so FastMCP verifies every inbound request with a call to Google;
-without a shared client, each of those calls opens and closes its own
-connection. The caller owns the client and closes it when serving stops.
+The ``google`` and ``zitadel`` branches also take a shared HTTP client. Both
+IdPs issue opaque access tokens (ZITADEL by default), so every inbound request
+is verified with a call to the IdP -- Google's token info endpoint, ZITADEL's
+token introspection endpoint. Without a shared client, each of those calls
+opens and closes its own connection. The caller owns the client and closes it
+when serving stops.
 
 To add a new IdP:
 
@@ -62,6 +66,8 @@ from fastmcp.server.auth.providers.azure import AzureProvider
 from fastmcp.server.auth.providers.google import GoogleProvider
 from fastmcp.server.auth.providers.keycloak import KeycloakAuthProvider
 
+from .zitadel_provider import ZitadelProvider
+
 if TYPE_CHECKING:
     from fastmcp_seaworthy import ClientStorage
 
@@ -84,8 +90,8 @@ def build_inbound_auth(
 
     The returned provider is passed to FastMCP via the ``auth=`` argument
     on the server. For DCR-bridge providers (``oidc``/``aws-cognito``/
-    ``google``/``azure``) it bridges downstream MCP clients' DCR requests
-    to the IdP's static-client model. For ``keycloak`` it sets up token
+    ``google``/``azure``/``zitadel``) it bridges downstream MCP clients' DCR
+    requests to the IdP's static-client model. For ``keycloak`` it sets up token
     verification + protected-resource-metadata advertising and relies on
     Keycloak's own DCR.
 
@@ -105,8 +111,9 @@ def build_inbound_auth(
             deployments pass the same instance for every base URL. Ignored for
             ``keycloak``.
         http_client: A shared client for the per-request token verification
-            calls to Google, so they reuse connections, or ``None`` for a new
-            client per call. The caller closes it. Used only by ``google``.
+            calls to the IdP, so they reuse connections, or ``None`` for a new
+            client per call. The caller closes it. Used only by ``google`` and
+            ``zitadel``.
 
     Returns:
         A FastMCP ``AuthProvider`` subclass instance.
@@ -193,7 +200,22 @@ def build_inbound_auth(
             **oauth_state,
         )
 
+    if config.inbound_auth_provider == "zitadel":
+        assert config.zitadel_domain is not None
+        assert config.client_id is not None
+        assert config.client_secret is not None
+        return ZitadelProvider(
+            domain=config.zitadel_domain,
+            client_id=config.client_id,
+            client_secret=config.client_secret,
+            required_scopes=scopes,
+            base_url=base_url,
+            enable_cimd=config.enable_cimd,
+            http_client=http_client,
+            **oauth_state,
+        )
+
     raise ValueError(
         f"Unknown inbound_auth_provider {config.inbound_auth_provider!r}; supported: "
-        "oidc, keycloak, aws-cognito, google, azure"
+        "oidc, keycloak, aws-cognito, google, azure, zitadel"
     )

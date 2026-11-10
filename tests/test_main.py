@@ -300,6 +300,8 @@ class TestCLIWebModeFlags:
             "tid",
             "--azure-identifier-uri",
             "api://example",
+            "--zitadel-domain",
+            "my-instance-abc123.zitadel.cloud",
             "--audience",
             "mcp-server",
         ]
@@ -309,6 +311,7 @@ class TestCLIWebModeFlags:
         assert args.cognito_aws_region == "us-east-1"
         assert args.azure_tenant_id == "tid"
         assert args.azure_identifier_uri == "api://example"
+        assert args.zitadel_domain == "my-instance-abc123.zitadel.cloud"
         assert args.audience == "mcp-server"
 
     def test_provider_specific_env_vars(self):
@@ -320,6 +323,7 @@ class TestCLIWebModeFlags:
                     "COGNITO_AWS_REGION": "eu-central-1",
                     "AZURE_TENANT_ID": "env-tid",
                     "AZURE_IDENTIFIER_URI": "api://env",
+                    "ZITADEL_DOMAIN": "env.zitadel.cloud",
                     "AUDIENCE": "env-aud",
                 },
                 clear=True,
@@ -329,6 +333,7 @@ class TestCLIWebModeFlags:
         assert args.cognito_aws_region == "eu-central-1"
         assert args.azure_tenant_id == "env-tid"
         assert args.azure_identifier_uri == "api://env"
+        assert args.zitadel_domain == "env.zitadel.cloud"
         assert args.audience == "env-aud"
 
     def test_enable_cimd_defaults_to_true(self):

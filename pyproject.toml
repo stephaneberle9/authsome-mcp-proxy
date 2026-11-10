@@ -1,7 +1,7 @@
 [project]
 name = "authsome-mcp-proxy"
 dynamic = ["version"]
-description = "A Model Context Protocol (MCP) proxy that adds an OAuth/OIDC frontend to upstream MCPs that don't include any such — either because they only validate tokens or expect static credentials such as API keys. Bridges to a configurable IdP (Keycloak, AWS Cognito, Google, Azure, generic OIDC) for Claude Desktop, Claude Code, Cursor, Codex, Claude.ai."
+description = "A Model Context Protocol (MCP) proxy that adds an OAuth/OIDC frontend to upstream MCPs that don't include any such — either because they only validate tokens or expect static credentials such as API keys. Bridges to a configurable IdP (Keycloak, AWS Cognito, Google, Azure, ZITADEL, generic OIDC) for Claude Desktop, Claude Code, Cursor, Codex, Claude.ai."
 readme = "README.md"
 authors = [
     { name = "Stephan Eberle", email = "stephaneberle9@gmail.com" }
@@ -28,6 +28,10 @@ dependencies = [
     #   4.0.6 keeps Google access tokens out of request URLs, and 4.0.8 revokes
     #   the upstream refresh token instead of sending the proxy's own token
     #   upstream.
+    # - 4.1.0 rather than 4.0.8 for the vendored ZITADEL provider
+    #   (authsome_mcp_proxy.zitadel_provider): it binds introspected tokens to
+    #   the proxy's client ID through IntrospectionTokenVerifier(audience=...),
+    #   which 4.1.0 added. 4.0.x raises TypeError when the provider is built.
     #
     # The ceiling guards a private API. Web mode serves one ASGI app per public
     # hostname over a single FastMCP server through fastmcp-seaworthy, which
@@ -36,7 +40,7 @@ dependencies = [
     # below 5 for that reason; the cap is repeated here so this package's own
     # metadata states what it was tested against, and uvx users -- who resolve
     # the newest fastmcp at install time -- cannot get a major nobody tested.
-    "fastmcp>=4.0.8,<5",
+    "fastmcp>=4.1.0,<5",
     # Multi-hostname serving (one OAuth identity per public base URL) and the
     # OAuth proxy's restart-safe state (signing key + external store), shared
     # with other FastMCP servers instead of kept as a copy here. 0.x may change

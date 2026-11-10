@@ -154,6 +154,29 @@ class TestInboundAuthDispatch:
             enable_cimd=True,
         )
 
+    def test_zitadel_dispatches_to_ZitadelProvider(self):
+        config = WebConfig(
+            inbound_auth_provider="zitadel",
+            proxy_base_url="https://mcp.example.com",
+            client_id="cid",
+            client_secret="csec",
+            zitadel_domain="my-instance-abc123.zitadel.cloud",
+            scopes="openid offline_access",
+        )
+        http_client = MagicMock(spec=httpx2.AsyncClient)
+        with patch("authsome_mcp_proxy.inbound_auth.ZitadelProvider") as mock_class:
+            build_inbound_auth(config, http_client=http_client)
+
+        mock_class.assert_called_once_with(
+            domain="my-instance-abc123.zitadel.cloud",
+            client_id="cid",
+            client_secret="csec",
+            required_scopes=["openid", "offline_access"],
+            base_url="https://mcp.example.com",
+            enable_cimd=True,
+            http_client=http_client,
+        )
+
     def test_unknown_provider_raises(self):
         # Bypass dataclass-level Literal validation by mutating after construction.
         config = WebConfig(
@@ -203,6 +226,15 @@ class TestCimdToggle:
                     "client_id": "cid",
                     "azure_tenant_id": "tid",
                     "scopes": "user.read",
+                },
+            ),
+            (
+                "zitadel",
+                "ZitadelProvider",
+                {
+                    "client_id": "cid",
+                    "client_secret": "csec",
+                    "zitadel_domain": "my-instance-abc123.zitadel.cloud",
                 },
             ),
         ],

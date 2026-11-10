@@ -111,6 +111,15 @@ class TestProviderWiring:
                 "AzureProvider",
                 {"client_id": "cid", "azure_tenant_id": "tid", "scopes": "user.read"},
             ),
+            (
+                "zitadel",
+                "ZitadelProvider",
+                {
+                    "client_id": "cid",
+                    "client_secret": "csec",
+                    "zitadel_domain": "my-instance-abc123.zitadel.cloud",
+                },
+            ),
         ],
     )
     def test_signing_key_and_store_are_forwarded(self, provider, patched, extra):

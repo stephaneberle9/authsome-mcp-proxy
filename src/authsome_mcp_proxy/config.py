@@ -29,7 +29,9 @@ from typing import Literal, TypeAlias
 
 from fastmcp_seaworthy import OAuthStateSettings, StoreBackend, check_distinct_hosts
 
-AuthProvider: TypeAlias = Literal["oidc", "keycloak", "aws-cognito", "google", "azure"]
+AuthProvider: TypeAlias = Literal[
+    "oidc", "keycloak", "aws-cognito", "google", "azure", "zitadel"
+]
 """Inbound auth provider type for web mode.
 
 Two distinct patterns are dispatched:
@@ -40,11 +42,11 @@ Two distinct patterns are dispatched:
   downstream MCP clients DCR directly against Keycloak. The proxy's job
   reduces to JWT verification + advertising Keycloak as the authorization
   server via OAuth 2.0 protected-resource metadata.
-- ``oidc`` / ``aws-cognito`` / ``google`` / ``azure`` -> DCR-bridge style
-  (``OIDCProxy`` or one of its IdP-specific subclasses). The proxy holds a
-  pre-registered static ``client_id`` / ``client_secret`` with the IdP and
-  bridges downstream MCP clients' DCR requests to the IdP's static-client
-  model. Use ``oidc`` as a fallback for older Keycloak or any generic OIDC
+- ``oidc`` / ``aws-cognito`` / ``google`` / ``azure`` / ``zitadel`` ->
+  DCR-bridge style (``OIDCProxy`` or one of its IdP-specific subclasses).
+  The proxy holds a pre-registered static ``client_id`` / ``client_secret``
+  with the IdP and bridges downstream MCP clients' DCR requests to the IdP's
+  static-client model. Use ``oidc`` as a fallback for older Keycloak or any generic OIDC
   IdP.
 """
 
@@ -108,10 +110,12 @@ class WebConfig:
             with the IdP. Empty by default -- single-hostname deployments are
             unaffected.
         client_id: OAuth client ID. Required for ``oidc``, ``aws-cognito``,
-            ``google``, ``azure``. Unused for ``keycloak`` (DCR-direct).
-        client_secret: OAuth client secret. Required for ``aws-cognito``;
-            optional for ``oidc`` / ``google`` / ``azure``; unused for
-            ``keycloak``.
+            ``google``, ``azure``, ``zitadel``. Unused for ``keycloak``
+            (DCR-direct).
+        client_secret: OAuth client secret. Required for ``aws-cognito`` and
+            ``zitadel`` (which also authenticates to ZITADEL's token
+            introspection endpoint with it); optional for ``oidc`` /
+            ``google`` / ``azure``; unused for ``keycloak``.
         scopes: Space-separated OAuth scopes for the inbound flow. Required
             for ``azure`` (FastMCP's ``AzureProvider`` requires
             ``required_scopes``).
@@ -142,10 +146,15 @@ class WebConfig:
         azure_tenant_id: Azure AD tenant ID -- required for ``azure``.
         azure_identifier_uri: Azure Application ID URI used for scope
             prefixing. Optional for ``azure``.
+        zitadel_domain: ZITADEL instance domain -- required for ``zitadel``.
+            A bare host (``my-instance-abc123.zitadel.cloud``) defaults to
+            HTTPS; a full URL (``http://localhost:8080``) is taken as is. The
+            OIDC discovery URL is derived as
+            ``{zitadel_domain}/.well-known/openid-configuration``.
 
-    OAuth proxy state (``oidc`` / ``aws-cognito`` / ``google`` / ``azure``;
-    inert for ``keycloak``, where Keycloak is the authorization server and the
-    proxy keeps no OAuth state):
+    OAuth proxy state (``oidc`` / ``aws-cognito`` / ``google`` / ``azure`` /
+    ``zitadel``; inert for ``keycloak``, where Keycloak is the authorization
+    server and the proxy keeps no OAuth state):
         jwt_signing_key: Secret the proxy signs the tokens it issues to MCP
             clients with, and from which the store's encryption key is
             derived. Unset, FastMCP derives both from ``client_secret``, so a
@@ -220,6 +229,9 @@ class WebConfig:
     # azure
     azure_tenant_id: str | None = None
     azure_identifier_uri: str | None = None
+
+    # zitadel
+    zitadel_domain: str | None = None
 
     # OAuth proxy state
     jwt_signing_key: str | None = None
@@ -319,6 +331,22 @@ class WebConfig:
             if not self.scopes:
                 # AzureProvider's required_scopes is a mandatory list[str].
                 raise ValueError("inbound_auth_provider='azure' requires scopes")
+        elif self.inbound_auth_provider == "zitadel":
+            # ZitadelProvider requires the secret: ZITADEL's introspection
+            # endpoint, which verifies every inbound token, needs client auth.
+            missing = [
+                name
+                for name, value in (
+                    ("client_id", self.client_id),
+                    ("client_secret", self.client_secret),
+                    ("zitadel_domain", self.zitadel_domain),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    f"inbound_auth_provider='zitadel' requires {', '.join(missing)}"
+                )
 
     def _validate_store(self) -> None:
         """Refuse a store backend the proxy could not keep readable.
