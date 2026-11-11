@@ -8,7 +8,7 @@ and where.
 
 - [Deployment modes at a glance](#deployment-modes-at-a-glance)
 - [MCP client compatibility matrix](#mcp-client-compatibility-matrix)
-- [Web-connector (HTTP) mode](#web-connector-http-mode)
+- [Web mode](#web-mode)
   - [The proxy's two hats](#the-proxys-two-hats)
   - [The two flows stitched together](#the-two-flows-stitched-together)
   - [Detailed step-by-step](#detailed-step-by-step)
@@ -16,7 +16,7 @@ and where.
   - [Reconciling with classical (non-proxied) OAuth intuitions](#reconciling-with-classical-non-proxied-oauth-intuitions)
   - [What persists, what doesn't](#what-persists-what-doesnt)
   - [Implications for pod-restart resilience](#implications-for-pod-restart-resilience)
-- [Desktop (stdio) mode](#desktop-stdio-mode)
+- [Desktop mode](#desktop-mode)
   - [The proxy's single hat](#the-proxys-single-hat)
   - [The single flow](#the-single-flow)
   - [Detailed step-by-step](#detailed-step-by-step-1)
@@ -26,11 +26,11 @@ and where.
 
 ## Deployment modes at a glance
 
-| Aspect | Web-connector (`--transport http`) | Desktop (`--transport stdio`) |
+| Aspect | Web mode (`--transport http`) | Desktop mode (`--transport stdio`) |
 |---|---|---|
 | Where the proxy runs | Persistent HTTP server, typically in Kubernetes or another long-running deployment | Local subprocess on the user's machine, launched by the MCP client |
 | Transport to the MCP client | HTTP / streamable JSON-RPC | stdio JSON-RPC |
-| Auth between MCP client and proxy | Full OAuth 2.0 + DCR + PKCE | None — local trust (the MCP client launches the proxy as its child) |
+| Auth between MCP client and proxy | Full OAuth 2.0 with PKCE; the client identifies itself by CIMD or DCR | None — local trust (the MCP client launches the proxy as its child) |
 | Who registers with the upstream IdP | The proxy, once, statically | The proxy, once, statically (per user) |
 | Who does the OAuth flow against the upstream IdP | The proxy, on behalf of every MCP client that connects | The proxy, on behalf of the single local user |
 | Where tokens are cached | The upstream IdP's tokens **in the proxy's store** (an encrypted file store by default, or an external backend); the proxy's own tokens, which refer to them, **on the MCP client** | On the proxy's filesystem (local user's home directory) |
@@ -39,31 +39,47 @@ and where.
 
 ## MCP client compatibility matrix
 
-| MCP client | Web-connector mode | Desktop mode (proxy as stdio subprocess) |
+| MCP client | Web mode | Desktop mode (proxy as stdio subprocess) |
 |---|---|---|
-| Claude Desktop | Indirectly via `mcp-remote` as bridge | ✅ native (configure in `claude_desktop_config.json` with `command`/`args`) |
+| Claude Desktop | ✅ native (*Settings → Connectors → Add custom connector*) | ✅ native (configure in `claude_desktop_config.json` with `command`/`args`) |
 | Claude Code | ✅ native (`claude mcp add --transport http`) | ✅ native (`claude mcp add --transport stdio`) |
-| Cursor | Indirectly via `mcp-remote` | ✅ native |
-| Codex | Indirectly via `mcp-remote` | ✅ native |
+| Claude.ai / Cowork | ✅ native (*Settings → Connectors → Add custom connector*) | ❌ cannot launch local subprocesses; web mode only |
+| Codex | ✅ native (`codex mcp add <name> --url <url>`, then `codex mcp login <name>`) | ✅ native |
+| Cursor | ✅ native (`url` entry in `mcp.json`) | ✅ native |
+| Mistral Le Chat | ✅ native (*Connectors → Add Connector → Custom MCP Connector*; registers through DCR, so not together with a [client allowlist](../README.md#limiting-which-clients-connect)) | ❌ cannot launch local subprocesses; web mode only |
+| Mistral Vibe | ✅ native (`vibe mcp add <name> --url <url>`) | ✅ native (`vibe mcp add <name> --transport stdio --command …`) |
 | MCP Inspector | ✅ native (HTTP transport) | ✅ native (stdio transport) |
-| Claude.ai / Cowork | ✅ native (custom connector URL) | ❌ cannot launch local subprocesses; web-connector mode only |
 
+> [!NOTE]
 > `mcp-remote` (npm) is an HTTP↔stdio bridge for clients that don't speak
-> HTTP MCP natively. In web-connector mode it lets Claude Desktop / Cursor
-> / Codex reach a remote proxy. In desktop mode it isn't involved at all
-> — this proxy is itself the stdio server.
+> HTTP MCP natively. None of the clients above needs it to reach the
+> proxy in web mode; it remains an option for a client that only knows
+> stdio servers. In desktop mode it isn't involved at all — this proxy
+> is itself the stdio server.
 
-## Web-connector (HTTP) mode
+## Web mode
+
+This section describes the inbound providers with which the proxy is the
+authorization server for its MCP clients: `oidc`, `aws-cognito`,
+`google`, `azure` and `zitadel`. With `keycloak` the IdP is the
+authorization server instead. MCP clients register and sign in at
+Keycloak directly, and the proxy only advertises Keycloak in its
+protected-resource metadata, verifies the JWTs Keycloak issues against
+Keycloak's JWKS and, with `OUTBOUND_AUTH=forward`, passes them on. None
+of the hats, stitched flows or stored records below exist then. The
+README's [How it works](../README.md#how-it-works) compares the two
+roles.
 
 ### The proxy's two hats
 
-In web-connector mode the proxy wears two OAuth 2.0 hats simultaneously,
-and the architecture only makes sense once you separate them:
+As the authorization server the proxy wears two OAuth 2.0 hats
+simultaneously, and the architecture only makes sense once you separate
+them:
 
 | Hat | Counterparty | Role | Credentials it holds |
 |---|---|---|---|
-| **OAuth 2.0 _client_** | Upstream IdP / Authorization Server (Cognito, Keycloak, Google, Azure, ZITADEL, generic OIDC) | The proxy is a single, pre-registered confidential client of the upstream IdP. | Static `client_id` + `client_secret` for the upstream IdP, loaded from the proxy's env (`OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`). |
-| **OAuth 2.0 _Authorization Server_** | The MCP client (Claude.ai/Cowork, Inspector, `mcp-remote`, …) | The proxy exposes a full OAuth AS surface (`/register`, `/authorize`, `/token`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/...`) with **Dynamic Client Registration** (RFC 7591) and **Client ID Metadata Documents** (CIMD, SEP-991). MCP clients either self-register at runtime or present an HTTPS URL as their `client_id`. | None per-MCP-client at registration time — a DCR client gets its own proxy-issued `client_id` (and `client_secret` if confidential); a CIMD client brings its own, and the proxy fetches its metadata from that URL. |
+| **OAuth 2.0 _client_** | Upstream IdP / Authorization Server (Cognito, Google, Azure, ZITADEL, generic OIDC) | The proxy is a single, pre-registered confidential client of the upstream IdP. | Static `client_id` + `client_secret` for the upstream IdP, loaded from the proxy's env (`OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET`). |
+| **OAuth 2.0 _Authorization Server_** | The MCP client (Claude.ai/Cowork, Inspector, `mcp-remote`, …) | The proxy exposes a full OAuth AS surface (`/register`, `/authorize`, `/token`, `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource/...`) with **Client ID Metadata Documents** (CIMD, SEP-991) and **Dynamic Client Registration** (RFC 7591), which the MCP specification deprecates in favor of CIMD. MCP clients either present an HTTPS URL as their `client_id` or self-register at runtime. | None per-MCP-client at registration time — a DCR client gets its own proxy-issued `client_id` (and `client_secret` if confidential); a CIMD client brings its own, and the proxy fetches its metadata from that URL. |
 
 **The tokens the proxy hands to MCP clients are its own.** It keeps the
 upstream IdP's access and refresh tokens in its store and issues the MCP
@@ -76,23 +92,28 @@ the one the MCP client presented (the upstream MCP server validates it
 against the same IdP, which is the standard deployment). The MCP client
 never sees an upstream token.
 
-Why bridge DCR onto a static-client IdP at all? MCP clients
-(Claude.ai/Cowork, Inspector, `mcp-remote`, …) expect to self-register
-via DCR. Most enterprise IdPs (Cognito, Google) only support static
-client registration. The proxy stands between the two and translates:
-each DCR'd MCP client gets its own identity at the proxy, while all
-DCR'd clients share the proxy's single pre-registered identity at the
-upstream IdP.
+Why put an authorization server in front of the IdP at all? MCP clients
+(Claude.ai/Cowork, Inspector, `mcp-remote`, …) expect to introduce
+themselves to the authorization server at runtime, by CIMD or DCR. Most
+enterprise IdPs (Cognito, Google) only support static client
+registration. The proxy stands between the two and translates: each MCP
+client gets its own identity at the proxy, while all of them share the
+proxy's single pre-registered identity at the upstream IdP.
 
-CIMD changes only the left-hand side of that translation. A CIMD client
-skips `/register` entirely: it sends its metadata-document URL as
-`client_id`, the proxy fetches and caches that document (HTTPS only,
-public addresses only, no redirects, 5 KB cap — FastMCP's SSRF-hardened
-fetcher), and from there the flow is identical. The upstream side is
-untouched: CIMD clients share the same single pre-registered identity at
-the IdP that DCR clients do. It is on by default and switchable with
-`ENABLE_CIMD` / `--no-enable-cimd`; for `INBOUND_AUTH_PROVIDER=keycloak`
-it is inert, because there Keycloak — not the proxy — is the AS.
+How the client got its identity changes only the left-hand side of that
+translation. A DCR client registers at `/register` first. A CIMD client
+skips that entirely: it sends its metadata-document URL as `client_id`,
+the proxy fetches and caches that document (HTTPS only, public addresses
+only, no redirects, 5 KB cap — FastMCP's SSRF-hardened fetcher), and
+from there the flow is identical. The upstream side is untouched: CIMD
+clients share the same single pre-registered identity at the IdP that
+DCR clients do. CIMD is on by default and switchable with `ENABLE_CIMD`
+/ `--no-enable-cimd`.
+
+Because every client shares that one identity at the IdP, only the proxy
+can tell the clients apart. `ALLOWED_CLIENT_IDS` makes it refuse every
+`client_id` that is not listed and turns DCR off; see the README section
+[Limiting which clients connect](../README.md#limiting-which-clients-connect).
 
 ### The two flows stitched together
 
@@ -129,7 +150,7 @@ MCP client                    proxy                       Upstream IdP / AS
    │   grant_type=authorization_code
    │   code=PROXY_CODE
    │   code_verifier=<PKCE>             ← no secret; PKCE proves the MCP
-   │                                       client is the same DCR registration
+   │                                       client is the same one
    │                                       that initiated the flow
    │ ◄───── proxy moves the upstream tokens it stored against
    │        PROXY_CODE into its token store, and returns its OWN
@@ -140,8 +161,8 @@ MCP client                    proxy                       Upstream IdP / AS
 ```
 
 The proxy is the **client** in the upper half (its OAuth-2.0-client hat)
-and the **Authorization Server** in the lower half (its DCR-enabled-AS
-hat). The two halves are independent OAuth flows that the proxy
+and the **Authorization Server** in the lower half (its
+authorization-server hat). The two halves are independent OAuth flows that the proxy
 stitches together through the temporary `PROXY_CODE`.
 
 ### Detailed step-by-step
@@ -161,10 +182,10 @@ stitches together through the temporary `PROXY_CODE`.
 
 | MCP client | Persistence layer |
 |---|---|
-| `mcp-remote` (npm) | `~/.mcp-auth/<server-hash>/` on local disk |
+| Claude.ai / Cowork / Claude Desktop (custom connector) | Anthropic-managed server-side state — persists across browser sessions and devices |
+| Claude Code / Cursor / Codex | The client's own credential store on the user's machine |
 | MCP Inspector | In-memory only — re-auths on every session |
-| Claude.ai / Cowork | Anthropic-managed server-side state — persists across browser sessions and devices |
-| Claude Desktop / Cursor / Codex | Via `mcp-remote` (when used as a stdio bridge): `~/.mcp-auth/<server-hash>/` |
+| `mcp-remote` (npm), where a client uses it as a stdio bridge | `~/.mcp-auth/<server-hash>/` on local disk |
 
 Server-side state on the proxy is uniform regardless of which MCP client
 is talking to it.
@@ -174,7 +195,7 @@ is talking to it.
 | Classical OAuth concept | Where it lives here |
 |---|---|
 | Confidential client with `client_secret` — calls `/token` from its callback handler | **The proxy.** The proxy is the upstream IdP's registered confidential client. The upstream `client_secret` lives in the proxy's env vars only. Used in step **3b**. |
-| Public client with PKCE — calls `/token` from its local callback | **The MCP client.** It's a DCR'd public client of the proxy. No secret; PKCE binds the `/token` call to the `/authorize` call. Used in step **3d**. |
+| Public client with PKCE — calls `/token` from its local callback | **The MCP client.** It's a public client of the proxy, known to it through CIMD or DCR. No secret; PKCE binds the `/token` call to the `/authorize` call. Used in step **3d**. |
 | `/callback` endpoint | Two different ones: **the proxy's `/auth/callback`** (where the upstream IdP redirects, step 3a) and **the MCP client's redirect URI** (where the proxy redirects, step 3c — e.g. `http://localhost:XXXX/oauth/callback` for `mcp-remote`, Anthropic-hosted for Claude.ai/Cowork). |
 | Authorization code | Two different ones: **`UPSTREAM_CODE`** (upstream-IdP-issued, consumed by the proxy in 3b) and **`PROXY_CODE`** (proxy-issued, consumed by the MCP client in 3d). |
 
@@ -195,8 +216,9 @@ After step 3d completes:
   Transaction state and `PROXY_CODE` are short-lived and gone. Every
   entry is Fernet-encrypted with a key derived from the proxy's signing
   key.
-- **Client side (MCP client):** the **DCR `client_id`** from step 1,
-  plus the **proxy-issued access + refresh tokens** received in step 3d.
+- **Client side (MCP client):** its **`client_id`** — the one DCR issued
+  in step 1, or its own CIMD URL — plus the **proxy-issued access +
+  refresh tokens** received in step 3d.
   Where these live depends on the MCP client (see table above).
 
 The **signing key** both signs the proxy's tokens and, through a key
@@ -209,9 +231,10 @@ fingerprint of the encryption key. `${FASTMCP_HOME}` defaults to
 `${HOME}/.local/share/fastmcp/` and resolves to
 `/app/.local/share/fastmcp/` inside the container with the project's
 default `HOME=/app`. `STORE_BACKEND` replaces it with an external
-backend (currently DynamoDB), which the proxy wraps in the same Fernet
-encryption; an external backend requires `JWT_SIGNING_KEY`. When several
-hostnames are served, all of their providers share the one store.
+backend (DynamoDB or PostgreSQL), which the proxy wraps in the same
+Fernet encryption; an external backend requires `JWT_SIGNING_KEY`. When
+several hostnames are served, all of their providers share the one
+store.
 
 ### Implications for pod-restart resilience
 
@@ -220,8 +243,9 @@ volume backing its directory, the whole store is lost:
 
 - The **DCR registry dies** → every MCP client that was registered now
   holds a `dcr_client_id` the proxy doesn't recognise. On the next
-  `/authorize` or `/token` call the proxy returns `invalid_client`
-  (RFC 6749 §5.2). Well-behaved MCP clients drop their local cache for
+  `/token` call the proxy returns `invalid_client` (RFC 6749 §5.2), and
+  on the next `/authorize` an error telling the client to register
+  again. Well-behaved MCP clients drop their local cache for
   the server and re-run the full flow (browser popup, user login, fresh
   DCR registration); clients that register once and cache the result
   need manual re-registration.
@@ -248,11 +272,11 @@ registrations and sessions only until the next secret rotation, and makes
 the proxy a single-replica `StatefulSet` pinned to the volume's
 availability zone. The alternative that keeps both, survives rotations
 and allows several replicas is a stable `JWT_SIGNING_KEY` plus an
-external store backend (`STORE_BACKEND=dynamodb`) that every replica
-shares; the README section
+external store backend (`STORE_BACKEND=dynamodb` or `postgres`) that
+every replica shares; the README section
 [Surviving restarts](../README.md#surviving-restarts) describes the setup.
 
-## Desktop (stdio) mode
+## Desktop mode
 
 ### The proxy's single hat
 
@@ -362,7 +386,7 @@ once more rather than reusing state from another version. Development
 builds share `authsome-mcp-proxy-dev/`.
 
 This cache has nothing to do with the web-mode `${FASTMCP_HOME}/oauth-proxy/`
-directory — desktop mode never runs the DCR-bridge code path.
+directory — desktop mode never runs the authorization-server code path.
 
 ### Reconciling with classical (non-proxied) OAuth intuitions
 

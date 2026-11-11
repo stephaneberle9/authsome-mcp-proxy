@@ -1,7 +1,7 @@
 <!-- omit from toc -->
 # Authsome MCP Proxy
 
-A [Model Context Protocol](https://modelcontextprotocol.com) (MCP) proxy that
+A [Model Context Protocol](https://modelcontextprotocol.io) (MCP) proxy that
 bridges *upstream MCP servers protected by token validation or static
 credentials* to MCP clients such as Claude Desktop, Claude Code, Cursor,
 Codex, MCP Inspector, and Claude.ai. ("Authsome" as in *awesome*, but with
@@ -9,18 +9,17 @@ auth.)
 
 The proxy can run as:
 
-- **Web connector** (`--transport http`, **recommended for end users**) —
+- **Web mode** (`--transport http`, **recommended for end users**) —
   a persistent HTTP server that any MCP client reaches by URL. Downstream
-  clients authenticate against the proxy via Dynamic Client Registration
-  or a Client ID Metadata Document; the proxy bridges to your IdP and
-  forwards traffic upstream. A single
+  clients sign in through the standard MCP OAuth flow; the proxy bridges
+  it to your IdP and forwards traffic upstream. A single
   instance can serve many users simultaneously and lives behind a normal
   URL (`https://mcp.example.com/mcp`) — no per-user config files,
   subprocess launchers, or local Python toolchains. This is the default
   for non-developer rollouts and the only mode that works with web-only
   clients like Claude.ai.
 
-- **Local stdio proxy** (`--transport stdio`, the default for backwards
+- **Desktop mode** (`--transport stdio`, the default for backwards
   compatibility, **developer use**) — launched as a subprocess by the MCP
   client (Claude Desktop, Cursor, Codex, Claude Code via `claude mcp
   add --transport stdio`). Each user runs their own instance and the proxy
@@ -31,18 +30,23 @@ The proxy can run as:
 
 - [What Is This For?](#what-is-this-for)
 - [Prerequisites](#prerequisites)
-- [Web Connector (Recommended)](#web-connector-recommended)
+- [Web Mode (Recommended)](#web-mode-recommended)
   - [How it works](#how-it-works)
-  - [Keycloak](#keycloak)
-  - [Generic OIDC](#generic-oidc)
-  - [AWS Cognito](#aws-cognito)
-  - [Google](#google)
-  - [Azure (Entra ID)](#azure-entra-id)
-  - [ZITADEL](#zitadel)
+  - [Proxy as authorization server](#proxy-as-authorization-server)
+    - [Generic OIDC](#generic-oidc)
+    - [AWS Cognito](#aws-cognito)
+    - [Google](#google)
+    - [Azure (Entra ID)](#azure-entra-id)
+    - [ZITADEL](#zitadel)
+  - [IdP as authorization server](#idp-as-authorization-server)
+    - [Keycloak](#keycloak)
   - [Connecting downstream MCP clients](#connecting-downstream-mcp-clients)
+  - [Client ID Metadata Documents (CIMD)](#client-id-metadata-documents-cimd)
+  - [Limiting which clients connect](#limiting-which-clients-connect)
   - [Identity advertised to downstream clients](#identity-advertised-to-downstream-clients)
+  - [Serving several hostnames from one deployment](#serving-several-hostnames-from-one-deployment)
   - [Surviving restarts](#surviving-restarts)
-- [Local Stdio Proxy (Developer Use)](#local-stdio-proxy-developer-use)
+- [Desktop Mode (Developer Use)](#desktop-mode-developer-use)
   - [Claude Desktop / Cursor / Codex](#claude-desktop--cursor--codex)
   - [Claude Code](#claude-code)
   - [MCP Inspector](#mcp-inspector)
@@ -81,9 +85,8 @@ The proxy fills these gaps by:
 
 1. **Inbound** — terminating the standard MCP auth handshake against an
    IdP the operator configures (Keycloak, OIDC, AWS Cognito, Google,
-   Azure, ZITADEL), so downstream MCP clients can perform Dynamic Client
-   Registration and the OAuth code flow without modifying the upstream;
-   and
+   Azure, ZITADEL), so downstream MCP clients can identify themselves
+   and run the OAuth code flow without modifying the upstream; and
 
 2. **Outbound** — forwarding the user's session token to the upstream
    (the default; works when the upstream and the proxy validate against
@@ -93,7 +96,7 @@ The proxy fills these gaps by:
    for the latter case.
 
 The proxy presupposes the upstream is itself an *MCP-native* server (one
-that exposes the MCP protocol — typically a web connector backed by a
+that exposes the MCP protocol — typically an MCP endpoint backed by a
 REST API in the same codebase). If your upstream is a bare REST API
 without MCP, build a full FastMCP server with `@mcp.tool()`-decorated
 handlers instead — this proxy can't synthesize tool definitions for you.
@@ -125,7 +128,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 See the [uv installation guide](https://docs.astral.sh/uv/getting-started/installation/) for more options.
 
-# Web Connector (Recommended)
+# Web Mode (Recommended)
 
 Run the proxy as a persistent HTTP server. Downstream MCP clients connect
 by URL (e.g. `https://mcp.example.com/mcp`). A single instance serves
@@ -137,7 +140,7 @@ connection so users never see each other's traffic.
 ```
 Browser           MCP Client (Claude.ai/Code/Inspector)
    │                       │
-   │  OAuth login          │  1. DCR + auth-code + token
+   │  OAuth login          │  1. register + code + token
    │ ◄────────────────────►│ ◄──────────────────────────────┐
    │                       │                                │
    │                       │  2. tools, prompts, resources  │
@@ -158,22 +161,50 @@ Browser           MCP Client (Claude.ai/Code/Inspector)
    └─── Upstream MCP validates U against the same IdP ──────┘
 ```
 
-The proxy wears two OAuth 2.0 hats at the same time: it is an **OAuth 2.0
-client** against the upstream IdP / Authorization Server, and a
-**OAuth 2.0 Authorization Server** for the MCP client, which may identify
-itself either by Dynamic Client Registration or by
-[CIMD](#client-id-metadata-documents-cimd) URL. The MCP client never sees
-the upstream IdP's tokens: the proxy keeps them in its store and issues
-its own signed tokens that refer to them. On every request it swaps the
-client's token for the upstream one, which is what `OUTBOUND_AUTH=forward`
-sends on. For the full sequence diagram, persistence model, and
-pod-restart implications, see [docs/oauth-flow.md](docs/oauth-flow.md);
-for keeping sessions across restarts, see
-[Surviving restarts](#surviving-restarts).
+The diagram shows the usual case, in which the proxy is itself the OAuth
+authorization server its MCP clients talk to. Which of two roles the
+proxy takes follows from `--inbound-auth-provider`:
+
+**Proxy as authorization server** (`oidc`, `aws-cognito`, `google`,
+`azure`, `zitadel`). MCP clients expect to introduce themselves to the
+authorization server at runtime, and these IdPs only know clients that
+were registered with them beforehand. The proxy therefore stands between
+the two and plays two OAuth 2.0 roles at once: it is a **client** of the
+IdP, as one pre-registered application (`OIDC_CLIENT_ID`), and the
+**authorization server** for the MCP clients. Clients register and sign
+in at the proxy, which sends the user on to the IdP to log in. The MCP
+client never sees the IdP's tokens: the proxy keeps them in its store
+and issues its own signed tokens that refer to them, swapping one for
+the other on every request. The IdP in turn never sees the MCP clients,
+only the proxy's one application.
+
+**IdP as authorization server** (`keycloak`). Keycloak lets MCP clients
+register with it directly, so the proxy stays out of the sign-in: it
+only tells clients that Keycloak is the authorization server and
+verifies the tokens Keycloak issues. Clients register and sign in at
+Keycloak and hold Keycloak's own tokens. The proxy holds no IdP
+credentials and keeps no OAuth state.
+
+Several things further down depend on that role, because they belong to
+whoever is the authorization server:
+
+| | Proxy as authorization server | IdP as authorization server |
+|---|---|---|
+| MCP clients register and sign in at | the proxy | the IdP |
+| How a client may identify itself ([CIMD](#client-id-metadata-documents-cimd) or DCR) is up to | the proxy | the IdP |
+| The IdP sees | the proxy's one application, whichever client connects | every MCP client as a client of its own |
+| [Which clients may connect](#limiting-which-clients-connect) is decided by | the proxy | the IdP |
+| The MCP client holds | the proxy's tokens, which refer to the IdP's | the IdP's tokens |
+| The proxy keeps | registrations and tokens — see [Surviving restarts](#surviving-restarts) | nothing |
+
+In both roles the token that `--outbound-auth forward` sends to the
+upstream MCP server is the IdP's. For the full sequence diagram,
+persistence model, and pod-restart implications, see
+[docs/oauth-flow.md](docs/oauth-flow.md).
 
 The proxy is IdP-agnostic — pick the inbound provider that matches your
 deployment via `--inbound-auth-provider`. The following sections give a
-working example for each.
+working example for each, grouped by role.
 
 > [!IMPORTANT]
 > All examples below assume the upstream MCP server validates tokens
@@ -181,38 +212,17 @@ working example for each.
 > the default). If the upstream uses a separate credential mechanism (API
 > key, service-account token, etc.), see [Advanced: Outbound Credential Substitution](#advanced-outbound-credential-substitution).
 
-## Keycloak
+## Proxy as authorization server
 
-For modern Keycloak (≥ 26.6.0) the proxy uses
-[`KeycloakAuthProvider`](https://github.com/jlowin/fastmcp/blob/main/src/fastmcp/server/auth/providers/keycloak.py),
-a `RemoteAuthProvider`. Keycloak supports MCP-compatible Dynamic Client
-Registration natively, so the proxy holds **no IdP credentials of its
-own** — downstream MCP clients DCR directly against Keycloak. The proxy's
-job reduces to JWT verification + protected-resource metadata
-advertising.
+With these providers the proxy holds one pre-registered application at
+the IdP and is the authorization server for the MCP clients (see
+[How it works](#how-it-works)). Register `{proxy-base-url}/auth/callback`
+as a redirect URI of that application.
 
-```bash
-uvx authsome-mcp-proxy \
-  --transport http \
-  --port 8000 \
-  --proxy-base-url https://mcp.example.com \
-  --inbound-auth-provider keycloak \
-  --oidc-issuer-url https://keycloak.example.com/realms/myrealm \
-  --oidc-scopes "openid email" \
-  --audience mcp-server \
-  https://mcp-upstream.example.com/mcp
-```
+### Generic OIDC
 
-For Keycloak < 26.6.0, use [`--inbound-auth-provider oidc`](#generic-oidc)
-instead — older Keycloak versions don't support MCP-compatible DCR
-natively, so the DCR-bridge mode of `OIDCProxy` is required.
-
-## Generic OIDC
-
-Use this for any OIDC-compliant IdP that *doesn't* support MCP-compatible
-DCR natively (older Keycloak, Auth0, Okta, etc.). The proxy itself
-holds a pre-registered static client with the IdP and bridges downstream
-DCR requests to the IdP's static-client model.
+Use this for any OIDC-compliant IdP that MCP clients cannot register
+with themselves (older Keycloak, Auth0, Okta, etc.).
 
 ```bash
 uvx authsome-mcp-proxy \
@@ -229,11 +239,9 @@ uvx authsome-mcp-proxy \
 ```
 
 The OIDC discovery URL is derived as
-`{oidc-issuer-url}/.well-known/openid-configuration`. Register the
-proxy's `{proxy-base-url}/auth/callback` as an allowed redirect URI in
-your IdP's client config.
+`{oidc-issuer-url}/.well-known/openid-configuration`.
 
-## AWS Cognito
+### AWS Cognito
 
 ```bash
 uvx authsome-mcp-proxy \
@@ -256,7 +264,7 @@ callback URL in the app client configuration. Cognito issues refresh
 tokens automatically when "Authorization code grant" is enabled — no
 `offline_access` scope needed.
 
-## Google
+### Google
 
 ```bash
 uvx authsome-mcp-proxy \
@@ -274,7 +282,7 @@ Create the OAuth client via the [Google Cloud Console](https://console.cloud.goo
 Add `{proxy-base-url}/auth/callback` to the client's authorized redirect
 URIs.
 
-## Azure (Entra ID)
+### Azure (Entra ID)
 
 ```bash
 uvx authsome-mcp-proxy \
@@ -295,7 +303,7 @@ and prefixed with `--azure-identifier-uri` automatically before being sent
 to Azure (`api://mcp-server/User.Read`), and the tenant ID is required
 because the issuer URL embeds it.
 
-## ZITADEL
+### ZITADEL
 
 ```bash
 uvx authsome-mcp-proxy \
@@ -311,13 +319,41 @@ uvx authsome-mcp-proxy \
 ```
 
 In the [ZITADEL](https://zitadel.com) Console (ZITADEL Cloud or
-self-hosted), create a dedicated project for the MCP server, since
-ZITADEL scopes token audiences to a whole project. Add a **Web**
-application to it with the authentication method **Code** (the client
-secret is sent with HTTP Basic) and `{proxy-base-url}/auth/callback` as
-redirect URI. ZITADEL accepts `http://` redirect URIs only with the
-application's *Development Mode* switched on. Copy the client secret
-right away; ZITADEL shows it only once.
+self-hosted), add a **Web** application for the proxy with the
+authentication method **Code** (the client secret is sent with HTTP
+Basic) and `{proxy-base-url}/auth/callback` as redirect URI. ZITADEL
+accepts `http://` redirect URIs only with the application's *Development
+Mode* switched on. Copy the client secret right away; ZITADEL shows it
+only once.
+
+Which project the application goes into matters, because ZITADEL scopes
+token audiences to a whole project: a token issued to an application
+carries the ID of that application's project in `aud`, without being
+asked to.
+
+- With `--outbound-auth forward` (the default), put the proxy's
+  application into **the same project as the upstream MCP server's
+  application**. The forwarded token then carries the upstream's project
+  audience by itself, and `--oidc-scopes` needs no audience scope for
+  it. Keep that project dedicated to the MCP server, the proxy's
+  application and the upstream's, and do not share it with unrelated
+  applications, whose tokens would carry the same audience.
+- Only the audiences of *other* projects need requesting: for each
+  further ZITADEL project whose APIs the upstream calls with the
+  forwarded token, add
+  `urn:zitadel:iam:org:project:id:<project-id>:aud` to `--oidc-scopes`.
+- With `--outbound-auth static` or `oauth-client-credentials` the token
+  never leaves the proxy, so a project of the proxy's own is enough.
+
+The application's **Auth Token Type** (*Token Settings* in the Console)
+decides what the upstream receives. The proxy itself works with both
+values, **Bearer Token** (the default, which issues opaque access
+tokens) and **JWT**, because it validates through introspection. In
+forward mode, though, that token goes on to the upstream unchanged, and
+an upstream that validates it locally as a JWT (signature against the
+JWKS, `iss`, `aud`, `exp`) rejects an opaque token with `401`. So: **an
+upstream that validates tokens itself needs Auth Token Type JWT.** An
+upstream that introspects tokens works with either.
 
 `--zitadel-domain` takes a bare host, which defaults to HTTPS, or a full
 URL such as `http://localhost:8080` for a local instance. The client
@@ -333,6 +369,12 @@ For refresh tokens, open the application's *OIDC Settings*, tick the
 `offline_access` out of `--oidc-scopes`. With no `--oidc-scopes` at
 all, the proxy requests `openid` only.
 
+`--oidc-scopes` are not only requested from ZITADEL: the proxy also
+requires each of them on every token, checked against the `scope` field
+of the introspection response. ZITADEL returns the requested scopes
+there unchanged, the reserved `urn:zitadel:iam:…` ones included, so
+audience scopes can be listed like any other.
+
 > [!NOTE]
 > No FastMCP release ships a ZITADEL provider yet. The proxy carries a
 > copy of the one proposed upstream in
@@ -340,17 +382,50 @@ all, the proxy requests `openid` only.
 > until one does, so the setup above is the same as it will be with
 > FastMCP's own.
 
+## IdP as authorization server
+
+With this provider the MCP clients register and sign in at the IdP
+itself, and the proxy only verifies the resulting tokens (see
+[How it works](#how-it-works)).
+
+### Keycloak
+
+For Keycloak ≥ 26.6.0 the proxy uses
+[`KeycloakAuthProvider`](https://github.com/PrefectHQ/fastmcp/blob/main/fastmcp_slim/fastmcp/server/auth/providers/keycloak.py),
+a `RemoteAuthProvider`. Keycloak supports MCP-compatible Dynamic Client
+Registration natively, so the proxy holds **no IdP credentials of its
+own** — downstream MCP clients register directly with Keycloak. The
+proxy's job reduces to JWT verification + protected-resource metadata
+advertising.
+
+```bash
+uvx authsome-mcp-proxy \
+  --transport http \
+  --port 8000 \
+  --proxy-base-url https://mcp.example.com \
+  --inbound-auth-provider keycloak \
+  --oidc-issuer-url https://keycloak.example.com/realms/myrealm \
+  --oidc-scopes "openid email" \
+  --audience mcp-server \
+  https://mcp-upstream.example.com/mcp
+```
+
+For Keycloak < 26.6.0, use [`--inbound-auth-provider oidc`](#generic-oidc)
+instead — older Keycloak versions don't support MCP-compatible DCR
+natively, so the proxy has to be the authorization server.
+
 ## Connecting downstream MCP clients
 
-Once the proxy is running on `https://mcp.example.com:8000/mcp`:
+Clients connect to `{proxy-base-url}/mcp`, `https://mcp.example.com/mcp`
+in the examples above:
 
 **Claude.ai:** in *Settings → Connectors → Add custom connector*, paste
-the URL. Claude will perform DCR against the proxy and walk the user
-through the OAuth flow in the browser.
+the URL. Claude identifies itself to the authorization server and walks
+the user through the OAuth flow in the browser.
 
 **Claude Code:**
 ```bash
-claude mcp add --transport http my-server https://mcp.example.com:8000/mcp
+claude mcp add --transport http my-server https://mcp.example.com/mcp
 ```
 
 **MCP Inspector:**
@@ -358,44 +433,53 @@ claude mcp add --transport http my-server https://mcp.example.com:8000/mcp
 npx -y @modelcontextprotocol/inspector
 ```
 …then in the UI: set *Transport Type* to **Streamable HTTP**, paste
-`https://mcp.example.com:8000/mcp` into *URL*, and — importantly — set
+`https://mcp.example.com/mcp` into *URL*, and — importantly — set
 *Connection Type* to **Via Proxy** (the default *Direct* mode bypasses
 Inspector's local OAuth helper and breaks the authorization flow against
 the proxy). Then click *Connect*.
 
 > [!NOTE]
-> On headless hosts (Docker, cloud VM, CI), the web connector doesn't
+> On headless hosts (Docker, cloud VM, CI), web mode doesn't
 > need a browser on the proxy machine — downstream MCP clients drive the
 > OAuth browser flow from wherever the user is sitting. Just expose the
 > proxy at a reachable URL and you're done.
 
 ## Client ID Metadata Documents (CIMD)
 
-DCR isn't the only way a downstream client can identify itself. With
-[Client ID Metadata Documents][cimd-draft] (adopted into MCP as SEP-991)
-a client hosts a small JSON document at an HTTPS URL it controls, and
-that URL *is* its `client_id`. The proxy fetches the document on first
-use instead of handing out a freshly registered client.
+Before an MCP client can send a user to sign in, it has to identify
+itself to the authorization server. The MCP specification's way to do
+that is the [Client ID Metadata Document][cimd-draft] (CIMD): a client
+hosts a small JSON document at an HTTPS URL it controls, and that URL
+*is* its `client_id`. The authorization server fetches the document on
+first use. Dynamic Client Registration (DCR), where the client registers
+at a `/register` endpoint and is handed a random `client_id`, is
+[deprecated in the MCP specification][mcp-auth] and kept for
+authorization servers and clients that do not support CIMD.
 
-Two things follow from that. The client keeps one durable identity
+How a client may identify itself is up to the authorization server, so
+it depends on the proxy's role (see [How it works](#how-it-works)):
+
+| Role | `--inbound-auth-provider` | CIMD |
+|---|---|---|
+| Proxy as authorization server | `oidc`, `google`, `azure`, `aws-cognito`, `zitadel` | ✅ the proxy handles CIMD itself, whether or not the IdP knows it |
+| IdP as authorization server | `keycloak` | ⚠️ not the proxy's call — clients register directly with Keycloak, so CIMD works only if your Keycloak does. `ENABLE_CIMD` is inert here. |
+
+The rest of this section is about the first role. There the proxy
+accepts both: CIMD is **enabled by default**, and DCR stays available
+next to it for clients that only support DCR. Turn CIMD off with
+`--no-enable-cimd` (or `ENABLE_CIMD=false`). DCR is turned off by a
+client allowlist, see
+[Limiting which clients connect](#limiting-which-clients-connect).
+
+CIMD has two advantages over DCR. The client keeps one durable identity
 across every server it talks to, rather than a different `client_id` per
-proxy instance. And because the metadata lives at the client's own URL,
-the proxy can re-fetch it after a restart — where a DCR registration
-that lived only in the proxy's client store is simply gone. The client's
-*session* is not covered by that: its tokens live in the proxy's store
-like everyone else's, see [Surviving restarts](#surviving-restarts).
-
-CIMD is **enabled by default** and is purely additive: DCR keeps working
-exactly as before, so nothing changes for clients that don't use CIMD.
-Turn it off with `--no-enable-cimd` (or `ENABLE_CIMD=false`).
-
-Support depends on the inbound provider, because it depends on who is
-acting as the authorization server:
-
-| `--inbound-auth-provider` | CIMD |
-|---|---|
-| `oidc`, `google`, `azure`, `aws-cognito`, `zitadel` | ✅ the proxy is the authorization server, and handles CIMD itself |
-| `keycloak` | ⚠️ not the proxy's call — clients register directly with Keycloak, so CIMD works only if your Keycloak does. `ENABLE_CIMD` is inert here. |
+proxy instance, and that identity names its publisher, which is what
+makes an allowlist possible. And because the metadata lives at the
+client's own URL, the proxy can re-fetch it after a restart — where a
+DCR registration that lived only in the proxy's client store is simply
+gone. The client's *session* is not covered by that: its tokens live in
+the proxy's store like everyone else's, see
+[Surviving restarts](#surviving-restarts).
 
 > [!IMPORTANT]
 > The proxy fetches the document from the client's own domain, so it
@@ -417,10 +501,93 @@ uvx fastmcp cimd validate https://client.example.com/oauth/client.json
 connection reaches `/authorize` with no `/register` call ahead of it.
 
 [cimd-draft]: https://datatracker.ietf.org/doc/html/draft-ietf-oauth-client-id-metadata-document
+[mcp-auth]: https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization
+
+## Limiting which clients connect
+
+Signing in establishes *who* the user is, not *which client software*
+they are using. Which MCP clients may connect is a separate decision,
+and it matters wherever tool results may only reach vendors you have
+vetted, because an MCP client sends the tool results to its LLM. That
+decision can only be made by the authorization server, the one party a
+client presents its `client_id` to. So where it is made depends on the
+proxy's role (see [How it works](#how-it-works)):
+
+- **IdP as authorization server** (`keycloak`): every MCP client
+  registers with Keycloak as a client of its own, so Keycloak knows
+  which software is connecting. Limit the clients there, with
+  Keycloak's
+  [client registration policies](https://www.keycloak.org/securing-apps/client-registration#_client_registration_policies):
+  its *Trusted Hosts* policy, for one, restricts which hosts may send
+  registration requests and which URLs a new client may use. The proxy
+  never sees a `client_id`, so its allowlist is not applied; it logs a
+  warning at startup if one is set.
+- **Proxy as authorization server** (every other provider): neither the
+  IdP nor the upstream MCP server can find out which client a user came
+  through. Every token the IdP issues names the proxy's own application
+  as the authorized party (`azp`, or `client_id`, is `OIDC_CLIENT_ID`),
+  whichever MCP client is behind it. Only the proxy can decide, with the
+  allowlist the rest of this section describes. By default it accepts
+  every client.
+
+`--allowed-client-ids` (or `ALLOWED_CLIENT_IDS`) names the clients that
+may connect:
+
+```bash
+uvx authsome-mcp-proxy ... --allowed-client-ids "https://claude.ai/"
+```
+
+Entries are separated by commas or whitespace. An entry matches a
+`client_id` exactly, or, for an `https://` URL ending in `/`, as a
+prefix: `https://claude.ai/` admits every client whose
+[Client ID Metadata Document](#client-id-metadata-documents-cimd) is
+published under that host, which covers Claude
+(`https://claude.ai/oauth/mcp-oauth-client-metadata`) and Claude Code
+(`https://claude.ai/oauth/claude-code-client-metadata`). The trailing
+`/` is what keeps the entry from matching
+`https://claude.ai.attacker.example/`, which is why there are no
+wildcards. A malformed entry is refused at startup.
+
+With an allowlist set:
+
+- **A client that is not listed is refused** before anything else
+  happens: its metadata document is never fetched, it cannot start a
+  sign-in, and the token endpoint answers it with `invalid_client`, so
+  it cannot refresh tokens it already holds either. Access tokens issued
+  earlier stay valid until they expire. Each refusal is logged as a
+  warning naming the `client_id`.
+- **Dynamic Client Registration is off.** A `client_id` from DCR is
+  random and anonymous, so it could never be listed: the `/register`
+  endpoint and its entry in the authorization-server metadata disappear,
+  and clients registered earlier are refused. Clients that support CIMD
+  use that instead, so keep CIMD enabled. If clients that only know DCR
+  must keep connecting, leave the allowlist unset; the two cannot be
+  combined.
+- **A client that sends the proxy's own `OIDC_CLIENT_ID`** instead of
+  registering (the "own OAuth client" option of Claude's custom
+  connector dialog, Claude Code's `--client-id`) is refused unless that
+  ID is listed. Listing it also requires
+  `--allowed-upstream-client-redirect-uris` (or
+  `ALLOWED_UPSTREAM_CLIENT_REDIRECT_URIS`), the redirect URIs such a
+  client may use, e.g. `https://claude.ai/api/mcp/auth_callback
+  http://localhost:* http://127.0.0.1:*`; the proxy refuses to start
+  without it, because that `client_id` alone would let in whoever knows
+  it.
+
+The same list applies to every hostname the proxy serves, and the
+startup log names the clients accepted, or says that every client is.
+A client that redirects to a loopback address, such as Claude Code,
+runs on the user's own machine, where any program can present its
+`client_id`: the allowlist keeps out other vendors' hosted clients, not
+software the user runs locally.
+
+The mechanism comes from
+[fastmcp-seaworthy](https://github.com/stephaneberle9/fastmcp-seaworthy#limiting-which-clients-connect),
+whose README covers the matching rules in full.
 
 ## Identity advertised to downstream clients
 
-In stdio mode the proxy relays the upstream MCP server's identity (name,
+In desktop mode the proxy relays the upstream MCP server's identity (name,
 version, instructions, website URL, icons) at startup, so the proxy
 appears transparent.
 
@@ -492,7 +659,8 @@ the `Host` header cannot tell them apart.
 ## Surviving restarts
 
 As the authorization server for its MCP clients (every provider except
-`keycloak`), the proxy keeps state: the clients registered through DCR,
+`keycloak`, see [How it works](#how-it-works)), the proxy keeps state:
+the clients registered through DCR,
 the upstream IdP's access and refresh tokens, and the mapping from the
 tokens it issued to them. It signs those tokens with a signing key. Both
 decide what a restart costs:
@@ -511,7 +679,8 @@ decide what a restart costs:
   issued token and strands everything stored, volume or not.
 
 A restart-safe deployment therefore sets both a signing key and an
-external store backend, shared by every replica:
+external store backend, shared by every replica: a DynamoDB table or a
+table in a PostgreSQL database. With DynamoDB:
 
 ```bash
 uvx 'authsome-mcp-proxy[dynamodb]' ... \
@@ -562,17 +731,119 @@ default so the proxy can run with the narrower permissions. Without TTL
 enabled on the table, the proxy also needs `dynamodb:UpdateTimeToLive` to
 enable it at startup.
 
+**PostgreSQL.** The backend needs the `postgres` extra
+(`uvx 'authsome-mcp-proxy[postgres]'`), which the published container
+image already includes. It is the external store for deployments
+outside AWS: a docker-compose stack, a PaaS with a managed PostgreSQL
+service, or any setup that already runs a database.
+
+```bash
+export JWT_SIGNING_KEY=...   # from your secret store
+export STORE_POSTGRES_URL='postgresql://proxy:<password>@db.example.com:5432/appdb?sslmode=require'
+uvx 'authsome-mcp-proxy[postgres]' ... --store-backend postgres
+```
+
+Set the connection URL through the `STORE_POSTGRES_URL` environment
+variable rather than `--store-postgres-url`: it usually carries the
+database password, and command-line arguments show up in process
+listings. The proxy never logs or echoes the URL. The startup line and
+startup errors name the table, the database, and the host and port
+only, and a database driver error that would quote the URL or the
+password has both replaced by `***`. `postgres://` works as a scheme
+too, and libpq query parameters such as `sslmode` are passed on.
+Percent-encode `@`, `/`, `?` and `#` in the user name and password
+(`%40`, `%2F`, `%3F`, `%23`); an unencoded one is refused at startup.
+
+Create the table with your migrations, or let
+`--store-postgres-auto-create` create it:
+
+```sql
+CREATE TABLE fastmcp_oauth_state (
+    collection TEXT NOT NULL,
+    key TEXT NOT NULL,
+    value JSONB NOT NULL,
+    ttl DOUBLE PRECISION,
+    created_at TIMESTAMPTZ,
+    expires_at TIMESTAMPTZ,
+    PRIMARY KEY (collection, key)
+);
+CREATE INDEX idx_fastmcp_oauth_state_expires_at
+    ON fastmcp_oauth_state (expires_at) WHERE expires_at IS NOT NULL;
+```
+
+The proxy's database role needs `SELECT`, `INSERT`, `UPDATE` and
+`DELETE` on the table; auto-create additionally needs `CREATE` on the
+schema, and is off by default so the proxy can run with the narrower
+role. `STORE_POSTGRES_TABLE` renames the table and optionally pins it to
+a schema, as in `oauth.fastmcp_oauth_state`; the schema must exist.
+Names are lowercase letters, digits and underscores. At startup the
+proxy checks that the table resolves where its queries will look for it
+and refuses to start, naming the table, if it does not.
+
+In a docker-compose stack, have the proxy wait for the database, since
+it connects at startup and exits if it cannot:
+
+```yaml
+services:
+  mcp-proxy:
+    image: ghcr.io/stephaneberle9/authsome-mcp-proxy:latest
+    environment:
+      # ... upstream URL, base URL and inbound provider settings ...
+      JWT_SIGNING_KEY: ${JWT_SIGNING_KEY}
+      STORE_BACKEND: postgres
+      STORE_POSTGRES_URL: postgresql://proxy:${POSTGRES_PASSWORD}@db:5432/proxy
+      STORE_POSTGRES_AUTO_CREATE: "true"
+    depends_on:
+      db:
+        condition: service_healthy
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_USER: proxy
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: proxy
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U proxy -d proxy"]
+      interval: 5s
+      retries: 10
+volumes:
+  db-data:
+```
+
+On a PaaS, bind or attach the platform's managed PostgreSQL service and
+set `STORE_POSTGRES_URL` from the connection URL the platform hands out,
+through its secret or environment mechanism rather than the start
+command. Platform-generated passwords often contain `@` or `/`, which
+must be percent-encoded as described above. Where the database is
+shared with an application, a schema-qualified `STORE_POSTGRES_TABLE`
+keeps the proxy's table out of the application's schema.
+
+**Expired rows are not deleted.** The store records each entry's expiry
+and ignores expired entries on read, but nothing removes them, so the
+table keeps every expired authorization code and token record. Unlike
+DynamoDB, PostgreSQL has no time to live of its own. Prune the table
+periodically, e.g. from a cron job or `pg_cron`; the partial index on
+`expires_at` keeps the statement cheap:
+
+```sql
+DELETE FROM fastmcp_oauth_state WHERE expires_at < now();
+-- or, with a qualified STORE_POSTGRES_TABLE:
+DELETE FROM oauth.fastmcp_oauth_state WHERE expires_at < now();
+```
+
 All of these settings are inert for `--inbound-auth-provider keycloak`,
 where Keycloak is the authorization server and the proxy keeps no OAuth
 state.
 
-# Local Stdio Proxy (Developer Use)
+# Desktop Mode (Developer Use)
 
-The original mode — the proxy is launched as a subprocess by the MCP
-client, performs the OAuth flow against an external OIDC IdP on the
-developer's behalf, caches tokens locally, and forwards them upstream.
+The proxy is launched as a subprocess by the MCP client, performs the
+OAuth flow against an external OIDC IdP on the developer's behalf,
+caches tokens locally, and forwards them upstream.
 
-Use stdio when:
+Use desktop mode when:
 
 - You don't have a server to host the proxy on.
 - You're a developer who wants per-user authentication on their own
@@ -821,13 +1092,13 @@ All options can be set via CLI flags or matching environment variables
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
-| `MCP_PROXY_TRANSPORT` | `--transport {stdio,http}` | `stdio` | Which transport to serve on. |
-| `MCP_PROXY_HOST` | `--host` | `0.0.0.0` | HTTP-mode bind address. |
-| `MCP_PROXY_PORT` | `--port` | `8000` | HTTP-mode listen port. |
+| `MCP_PROXY_TRANSPORT` | `--transport {stdio,http}` | `stdio` | Which transport to serve on: `stdio` is desktop mode, `http` is web mode. |
+| `MCP_PROXY_HOST` | `--host` | `0.0.0.0` | Web-mode bind address. |
+| `MCP_PROXY_PORT` | `--port` | `8000` | Web-mode listen port. |
 | `MCP_PROXY_BASE_URL` | `--proxy-base-url` | _required for http_ | Publicly reachable URL of the proxy. Used to advertise auth metadata to downstream clients. Accepts a comma-separated list to serve several hostnames, each as its own OAuth identity — see [Serving several hostnames from one deployment](#serving-several-hostnames-from-one-deployment). |
 | `MCP_PROXY_DEBUG` | `--debug` | _off_ | Enable debug logging. |
 
-**Server identity advertised to downstream clients** (http mode):
+**Server identity advertised to downstream clients** (web mode):
 
 | Env var | CLI flag | Description |
 |---|---|---|
@@ -836,7 +1107,7 @@ All options can be set via CLI flags or matching environment variables
 | `MCP_PROXY_INSTRUCTIONS` | `--proxy-instructions` | Tool-selection hints for the LLM. Optional override: unset, the upstream's instructions are relayed. |
 | `MCP_PROXY_WEBSITE_URL` | `--proxy-website-url` | Project URL shown in client UIs. Optional override: unset, the upstream's website URL is relayed. |
 
-**Inbound auth** (http mode — pick a provider, then supply the fields it
+**Inbound auth** (web mode — pick a provider, then supply the fields it
 needs):
 
 | Env var | CLI flag | Description |
@@ -854,18 +1125,29 @@ needs):
 | `ZITADEL_DOMAIN` | `--zitadel-domain` | ZITADEL instance domain (bare host, defaults to HTTPS) or full URL. |
 | `ENABLE_CIMD` | `--enable-cimd` / `--no-enable-cimd` | Accept Client ID Metadata Documents from downstream clients. On by default — see [Client ID Metadata Documents (CIMD)](#client-id-metadata-documents-cimd). |
 
-**OAuth proxy state** (http mode, inert for `keycloak` — see
+**OAuth proxy state** (web mode, inert for `keycloak` — see
 [Surviving restarts](#surviving-restarts)):
 
 | Env var | CLI flag | Default | Description |
 |---|---|---|---|
 | `JWT_SIGNING_KEY` | `--jwt-signing-key` | _derived from `OIDC_CLIENT_SECRET`_ | Signs the tokens the proxy issues and keys its store's encryption. At least 32 characters. Required with a `STORE_BACKEND` other than `file`. |
-| `STORE_BACKEND` | `--store-backend {file,dynamodb}` | `file` | Where client registrations and sessions are kept. `dynamodb` needs the `dynamodb` extra. |
+| `STORE_BACKEND` | `--store-backend {file,dynamodb,postgres}` | `file` | Where client registrations and sessions are kept. `dynamodb` needs the `dynamodb` extra, `postgres` the `postgres` extra. |
 | `STORE_DYNAMODB_TABLE` | `--store-dynamodb-table` | _required for `dynamodb`_ | DynamoDB table name. |
 | `STORE_DYNAMODB_REGION` | `--store-dynamodb-region` | _AWS SDK default_ | AWS region of the table. |
 | `STORE_DYNAMODB_AUTO_CREATE` | `--store-dynamodb-auto-create` / `--no-store-dynamodb-auto-create` | _off_ | Create the table at startup when it is missing, instead of refusing to start. |
+| `STORE_POSTGRES_URL` | `--store-postgres-url` | _required for `postgres`_ | PostgreSQL connection URL, `postgresql://user:password@host:5432/database`. Usually carries the database password: set it through the environment, not the flag, since command-line arguments show up in process listings. Never logged. |
+| `STORE_POSTGRES_TABLE` | `--store-postgres-table` | `fastmcp_oauth_state` | Table name, optionally schema-qualified as `schema.table`. |
+| `STORE_POSTGRES_AUTO_CREATE` | `--store-postgres-auto-create` / `--no-store-postgres-auto-create` | _off_ | Create the table at startup when it is missing, instead of refusing to start. |
 
-**Outbound auth** (http mode — `forward` is the default and needs no
+**Client allowlist** (web mode, not applied for `keycloak` — see
+[Limiting which clients connect](#limiting-which-clients-connect)):
+
+| Env var | CLI flag | Default | Description |
+|---|---|---|---|
+| `ALLOWED_CLIENT_IDS` | `--allowed-client-ids` | _every client_ | The OAuth clients that may connect, separated by commas or whitespace: exact `client_id`s, or `https://` URLs ending in `/` that allow every `client_id` under them, e.g. `https://claude.ai/`. Set, Dynamic Client Registration is off. |
+| `ALLOWED_UPSTREAM_CLIENT_REDIRECT_URIS` | `--allowed-upstream-client-redirect-uris` | _none_ | The redirect URIs a client sending `OIDC_CLIENT_ID` itself may use, e.g. `http://localhost:*`. Required when `ALLOWED_CLIENT_IDS` lists `OIDC_CLIENT_ID`, and applied to that client only. |
+
+**Outbound auth** (web mode — `forward` is the default and needs no
 extra fields):
 
 | Env var | CLI flag | Description |
@@ -877,7 +1159,7 @@ extra fields):
 | `OUTBOUND_HEADER_NAME` | `--outbound-header-name` | Header name for `static` (default `Authorization`). |
 | `OUTBOUND_HEADER_VALUE` | `--outbound-header-value` | Literal header value for `static`. |
 
-**Inbound (stdio mode)** — only `OIDC_*` apply; transport and inbound
+**Inbound (desktop mode)** — only `OIDC_*` apply; transport and inbound
 auth are not exposed downstream since the MCP client launches the proxy
 as a trusted subprocess:
 
@@ -889,12 +1171,12 @@ Run `uvx authsome-mcp-proxy --help` for the always-current list.
 
 # Credential Management
 
-Tokens obtained in **stdio mode** (the proxy's OAuth code flow) are
+Tokens obtained in **desktop mode** (the proxy's OAuth code flow) are
 cached in `~/.cache/authsome-mcp-proxy-<version>/` (where `<version>`
 is the installed package version) as a SQLite database:
 
 ```
-~/.cache/authsome-mcp-proxy-0.5.0/
+~/.cache/authsome-mcp-proxy-<version>/
   ├── cache.db
   ├── cache.db-shm
   └── cache.db-wal
@@ -910,11 +1192,13 @@ rm -rf ~/.cache/authsome-mcp-proxy*
 rmdir /s %USERPROFILE%\.cache\authsome-mcp-proxy*
 ```
 
-In **web mode** the proxy doesn't cache its own tokens — downstream MCP
-clients each hold their own session token they obtained via DCR against
-the proxy. Each client manages its own cache.
+In **web mode** the proxy has no such cache. Each downstream MCP client
+holds the tokens it obtained from the authorization server and manages
+its own cache; what the proxy itself stores is described in
+[Surviving restarts](#surviving-restarts).
 
-**Headless stdio first-run**: if your stdio deployment target has no
+**Headless desktop-mode first run**: if your desktop-mode deployment
+target has no
 browser (Docker, headless VM, CI), authenticate once on a machine with a
 browser to populate the cache, then copy it over:
 
@@ -929,18 +1213,27 @@ long-lived refresh tokens; Cognito issues them automatically.
 
 # Troubleshooting
 
-**Browser doesn't open (stdio mode)** — check that port 8080 (or your
+**Browser doesn't open (desktop mode)** — check that port 8080 (or your
 custom redirect port) isn't blocked, manually open the URL shown in the
 proxy logs, and verify your firewall isn't blocking localhost
 connections.
 
 **`401 Unauthorized` from the upstream** — verify `OIDC_ISSUER_URL`
-matches the IdP your upstream validates against, check requested scopes,
-and clear the cache (`rm -rf ~/.cache/authsome-mcp-proxy*`) before
-retrying. Run with `--debug` for token-level diagnostics.
+matches the IdP your upstream validates against and check requested
+scopes; in desktop mode, clear the cache
+(`rm -rf ~/.cache/authsome-mcp-proxy*`) before retrying. Run with
+`--debug` for token-level diagnostics. With ZITADEL,
+an upstream that validates tokens itself needs the application's Auth
+Token Type set to JWT and its own project in the token's audience — see
+[ZITADEL](#zitadel).
+
+**A client that used to connect is refused, or `/register` returns
+`404`** — a client allowlist is set (`ALLOWED_CLIENT_IDS`); the startup
+log names the clients it accepts. See
+[Limiting which clients connect](#limiting-which-clients-connect).
 
 **`redirect_uri mismatch` from the IdP** — add the proxy's callback URL
-to the OAuth client's allowed redirect URIs at the IdP. For stdio mode
+to the OAuth client's allowed redirect URIs at the IdP. For desktop mode
 that's `http://localhost:8080/auth/callback` (or whatever
 `OIDC_REDIRECT_URL` is set to); for web mode it's
 `{MCP_PROXY_BASE_URL}/auth/callback`. The match has to be exact, including
@@ -963,7 +1256,7 @@ once the app client has "Authorization code grant" enabled.
 relayed from the upstream. See [Identity advertised to downstream
 clients](#identity-advertised-to-downstream-clients).
 
-**MCP client doesn't recognise the proxy at all (stdio)** — JSON
+**MCP client doesn't recognise the proxy at all (desktop mode)** — JSON
 syntax errors are by far the most common cause; double-check trailing
 commas and quotes. Confirm `uvx` is on PATH and restart the MCP client
 completely (not just reload).

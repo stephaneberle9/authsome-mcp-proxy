@@ -7,7 +7,7 @@
 - [Running the Server](#running-the-server)
   - [Inside dev environment](#inside-dev-environment)
   - [Outside dev environment](#outside-dev-environment)
-  - [As Web Connector Proxy (HTTP Transport)](#as-web-connector-proxy-http-transport)
+  - [In Web Mode (HTTP Transport)](#in-web-mode-http-transport)
   - [With MCP Inspector](#with-mcp-inspector)
   - [With Claude Desktop](#with-claude-desktop)
   - [With Claude Code](#with-claude-code)
@@ -69,9 +69,9 @@ uv run --env-file /path/to/authsome-mcp-proxy/.env --project "/path/to/authsome-
 uv run --env-file /path/to/authsome-mcp-proxy/.env --with-editable "/path/to/authsome-mcp-proxy" authsome-mcp-proxy [options]
 ```
 
-### As Web Connector Proxy (HTTP Transport)
+### In Web Mode (HTTP Transport)
 
-Run the dev build as a persistent HTTP server instead of the default stdio transport:
+Run the dev build in web mode, as a persistent HTTP server, instead of the default desktop mode (stdio transport):
 
 ```bash
 uv run authsome-mcp-proxy --transport http --port 8000 \
@@ -85,11 +85,11 @@ uv run authsome-mcp-proxy --transport http --port 8000 \
 uv run --env-file .env authsome-mcp-proxy --transport http --port 8000
 ```
 
-The proxy authenticates via browser on first run, then serves MCP over HTTP at `http://localhost:8000/mcp`. Connect any MCP client to that URL while the server is running.
+The proxy serves MCP over HTTP at `http://localhost:8000/mcp`. Connect any MCP client to that URL while the server is running; the client walks the user through sign-in in the browser on first connection.
 
 ### With MCP Inspector
 
-**Stdio (inspector launches the proxy):**
+**Desktop mode (inspector launches the proxy):**
 
 Create an `mcp.json` file containing:
 
@@ -132,9 +132,9 @@ In your browser, connect to your MCP proxy server, authenticate and use the tool
 - List tools of upstream MCP server: `Tools` > `List Tools`
 - Find MCP proxy server logs under `Server Notifications`
 
-**HTTP (connecting to a running proxy):**
+**Web mode (connecting to a running proxy):**
 
-Start the proxy in HTTP mode first (see [As Web Connector Proxy](#as-web-connector-proxy-http-transport)), then launch the inspector and connect via its UI:
+Start the proxy in web mode first (see [In Web Mode](#in-web-mode-http-transport)), then launch the inspector and connect via its UI:
 
 ```bash
 npx -y @modelcontextprotocol/inspector
@@ -195,7 +195,7 @@ Alternatively, go to `Settings` > `Developer` > select `authsome-mcp-proxy` > `O
 
 ### With Claude Code
 
-**Stdio (Claude Code launches the proxy as a subprocess):**
+**Desktop mode (Claude Code launches the proxy as a subprocess):**
 
 ```bash
 claude mcp add --transport stdio authsome-mcp-proxy -- \
@@ -215,9 +215,9 @@ claude mcp add --transport stdio authsome-mcp-proxy -- \
   https://mcp-upstream.company.com/mcp
 ```
 
-**HTTP (connecting to a running dev proxy):**
+**Web mode (connecting to a running dev proxy):**
 
-Start the proxy in HTTP mode first (see [As Web Connector Proxy](#as-web-connector-proxy-http-transport)), then register it:
+Start the proxy in web mode first (see [In Web Mode](#in-web-mode-http-transport)), then register it:
 
 ```bash
 claude mcp add --transport http authsome-mcp-proxy http://localhost:8000/mcp
