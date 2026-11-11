@@ -1,7 +1,7 @@
 """Tests for how the proxy configures and wires the OAuth proxy's state store.
 
-The store itself -- encryption, key derivation, DynamoDB, what survives a
-restart -- is fastmcp-seaworthy's and tested there. What remains here is the
+The store itself -- encryption, key derivation, DynamoDB, PostgreSQL, what
+survives a restart -- is fastmcp-seaworthy's and tested there. What remains here is the
 proxy's part: the CLI and env settings, ``WebConfig.oauth_state``, and handing
 signing key and store to every provider and hostname.
 """
@@ -26,6 +26,9 @@ from authsome_mcp_proxy.inbound_auth import build_inbound_auth
 
 SIGNING_KEY = "a-signing-key-shared-by-every-replica"
 
+POSTGRES_PASSWORD = "p4ss-w0rd-never-shown"
+POSTGRES_URL = f"postgresql://pguser:{POSTGRES_PASSWORD}@db.example.com:5432/appdb"
+
 
 def _oidc_config(**overrides: Any) -> WebConfig:
     values: dict[str, Any] = {
@@ -48,6 +51,16 @@ def _dynamodb_config(table: str = "oauth-state", **overrides) -> WebConfig:
     )
 
 
+def _postgres_config(**overrides) -> WebConfig:
+    values: dict[str, Any] = {
+        "jwt_signing_key": SIGNING_KEY,
+        "store_backend": "postgres",
+        "store_postgres_url": POSTGRES_URL,
+    }
+    values.update(overrides)
+    return _oidc_config(**values)
+
+
 class TestOAuthState:
     """``WebConfig.oauth_state`` is what reaches fastmcp-seaworthy."""
 
@@ -68,6 +81,18 @@ class TestOAuthState:
             store_dynamodb_table="oauth-state",
             store_dynamodb_region="eu-west-1",
             store_dynamodb_auto_create=True,
+        )
+
+    def test_every_postgres_setting_is_carried_over(self):
+        settings = _postgres_config(
+            store_postgres_table="oauth.proxy_state", store_postgres_auto_create=True
+        ).oauth_state
+        assert settings == OAuthStateSettings(
+            jwt_signing_key=SIGNING_KEY,
+            store_backend="postgres",
+            store_postgres_url=POSTGRES_URL,
+            store_postgres_table="oauth.proxy_state",
+            store_postgres_auto_create=True,
         )
 
     def test_keycloak_has_none(self):
@@ -135,6 +160,20 @@ class TestProviderWiring:
         storage = build_client_storage(config.oauth_state)
         assert storage is not None
         with patch(f"authsome_mcp_proxy.inbound_auth.{patched}") as mock_class:
+            build_inbound_auth(config, client_storage=storage)
+
+        kwargs = mock_class.call_args.kwargs
+        assert kwargs["jwt_signing_key"] == SIGNING_KEY
+        assert kwargs["client_storage"] is storage.store
+
+    def test_postgres_store_is_forwarded(self):
+        """Building the store connects to nothing: the pool is opened by
+        ``serve_http``, so this needs no database."""
+        config = _postgres_config()
+        assert config.oauth_state is not None
+        storage = build_client_storage(config.oauth_state)
+        assert storage is not None
+        with patch("authsome_mcp_proxy.inbound_auth.OIDCProxy") as mock_class:
             build_inbound_auth(config, client_storage=storage)
 
         kwargs = mock_class.call_args.kwargs
@@ -213,8 +252,10 @@ def test_nothing_configured_imports_no_backend_dependency(tmp_path):
 
         loaded = sorted(
             name for name in sys.modules
-            if name.split(".")[0] in {"aioboto3", "aiobotocore", "boto3", "botocore"}
+            if name.split(".")[0]
+            in {"aioboto3", "aiobotocore", "boto3", "botocore", "asyncpg"}
             or name.startswith("key_value.aio.stores.dynamodb")
+            or name.startswith("key_value.aio.stores.postgresql")
         )
         print(",".join(loaded))
         """
@@ -252,6 +293,9 @@ _STORE_ENV = (
     "STORE_DYNAMODB_TABLE",
     "STORE_DYNAMODB_REGION",
     "STORE_DYNAMODB_AUTO_CREATE",
+    "STORE_POSTGRES_URL",
+    "STORE_POSTGRES_TABLE",
+    "STORE_POSTGRES_AUTO_CREATE",
 )
 
 
@@ -277,6 +321,9 @@ class TestCLI:
         assert config.store_dynamodb_table is None
         assert config.store_dynamodb_region is None
         assert config.store_dynamodb_auto_create is False
+        assert config.store_postgres_url is None
+        assert config.store_postgres_table is None
+        assert config.store_postgres_auto_create is False
 
     def test_flags(self):
         config = _config_from_cli(
@@ -349,6 +396,116 @@ class TestCLI:
             )
 
 
+class TestPostgresCLI:
+    """The PostgreSQL settings follow the DynamoDB ones: env var plus flag."""
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch: pytest.MonkeyPatch):
+        for name in _STORE_ENV:
+            monkeypatch.delenv(name, raising=False)
+
+    def test_env_vars(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("JWT_SIGNING_KEY", SIGNING_KEY)
+        monkeypatch.setenv("STORE_BACKEND", "postgres")
+        monkeypatch.setenv("STORE_POSTGRES_URL", POSTGRES_URL)
+        monkeypatch.setenv("STORE_POSTGRES_TABLE", "oauth.proxy_state")
+        monkeypatch.setenv("STORE_POSTGRES_AUTO_CREATE", "true")
+
+        config = _config_from_cli([])
+
+        assert config.store_backend == "postgres"
+        assert config.store_postgres_url == POSTGRES_URL
+        assert config.store_postgres_table == "oauth.proxy_state"
+        assert config.store_postgres_auto_create is True
+
+    def test_flags(self):
+        config = _config_from_cli(
+            [
+                "--jwt-signing-key",
+                SIGNING_KEY,
+                "--store-backend",
+                "postgres",
+                "--store-postgres-url",
+                POSTGRES_URL,
+                "--store-postgres-table",
+                "proxy_state",
+                "--store-postgres-auto-create",
+            ]
+        )
+        assert config.store_backend == "postgres"
+        assert config.store_postgres_url == POSTGRES_URL
+        assert config.store_postgres_table == "proxy_state"
+        assert config.store_postgres_auto_create is True
+
+    def test_flags_override_env_vars(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("JWT_SIGNING_KEY", SIGNING_KEY)
+        monkeypatch.setenv("STORE_BACKEND", "postgres")
+        monkeypatch.setenv("STORE_POSTGRES_URL", POSTGRES_URL)
+        monkeypatch.setenv("STORE_POSTGRES_TABLE", "from_the_environment")
+        monkeypatch.setenv("STORE_POSTGRES_AUTO_CREATE", "true")
+
+        config = _config_from_cli(
+            [
+                "--store-postgres-table",
+                "proxy_state",
+                "--no-store-postgres-auto-create",
+            ]
+        )
+
+        assert config.store_postgres_table == "proxy_state"
+        assert config.store_postgres_auto_create is False
+
+    def test_unparsable_auto_create_is_rejected(self, monkeypatch: pytest.MonkeyPatch):
+        monkeypatch.setenv("STORE_POSTGRES_AUTO_CREATE", "enabled")
+        with pytest.raises(ValueError, match="STORE_POSTGRES_AUTO_CREATE must be"):
+            _config_from_cli([])
+
+    def test_missing_url_is_refused_naming_the_setting(self):
+        with pytest.raises(ValueError, match="STORE_POSTGRES_URL"):
+            _config_from_cli(
+                ["--jwt-signing-key", SIGNING_KEY, "--store-backend", "postgres"]
+            )
+
+    def test_table_name_is_checked_at_startup(self):
+        with pytest.raises(ValueError, match="STORE_POSTGRES_TABLE"):
+            _postgres_config(store_postgres_table="Not-A-Table")
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            # Not a PostgreSQL URL at all.
+            f"mysql://pguser:{POSTGRES_PASSWORD}@db.example.com/appdb",
+            # An unencoded '@' in the password, which asyncpg and urllib split
+            # differently -- part of the password would be read as the host.
+            f"postgresql://pguser:{POSTGRES_PASSWORD}@x@db.example.com/appdb",
+        ],
+    )
+    def test_a_refused_url_is_never_quoted(self, url):
+        """The refusal reaches the log through ``log_error_and_exit``."""
+        with pytest.raises(ValueError, match="STORE_POSTGRES_URL") as excinfo:
+            _postgres_config(store_postgres_url=url)
+
+        assert POSTGRES_PASSWORD not in str(excinfo.value)
+        assert url not in str(excinfo.value)
+
+    def test_url_is_kept_out_of_the_config_repr(self):
+        """A dataclass repr ends up in tracebacks and debug logs."""
+        config = _postgres_config()
+
+        assert POSTGRES_PASSWORD not in repr(config)
+        assert POSTGRES_URL not in repr(config)
+        assert POSTGRES_PASSWORD not in repr(config.oauth_state)
+
+    def test_settings_are_inert_for_keycloak(self):
+        config = WebConfig(
+            inbound_auth_provider="keycloak",
+            proxy_base_url="https://mcp.example.com",
+            issuer_url="https://kc.example.com/realms/r",
+            store_backend="postgres",
+        )
+        assert config.oauth_state is None
+
+
 @asynccontextmanager
 async def _noop_lifespan():
     yield
@@ -419,6 +576,67 @@ class TestServeHttp:
             "tokens signed with JWT_SIGNING_KEY"
         ) in caplog.text
         assert SIGNING_KEY not in caplog.text
+
+    async def test_postgres_store_is_logged_once_without_credentials(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """One line for the process, however many hostnames it serves, naming
+        the table, database, host and port -- never the user or password."""
+        config = _postgres_config(
+            proxy_base_url="https://mcp.example.io",
+            additional_proxy_base_urls=["https://mcp.example.com"],
+        )
+        storage = MagicMock(name="storage")
+        storage.open = AsyncMock()
+        storage.close = AsyncMock()
+        with (
+            patch(
+                "authsome_mcp_proxy.mcp_proxy.build_client_storage",
+                return_value=storage,
+            ),
+            patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth") as build_inbound,
+            patch("fastmcp_seaworthy.serve.create_streamable_http_app"),
+            patch("fastmcp_seaworthy.serve.HostRouter"),
+            patch("fastmcp_seaworthy.serve.uvicorn") as uvicorn_mod,
+            caplog.at_level("DEBUG"),
+        ):
+            uvicorn_mod.Server.return_value.serve = AsyncMock()
+            await mcp_proxy._serve_http(_fake_server(), config, show_banner=False)
+
+        assert build_inbound.call_count == 2
+        line = (
+            "OAuth state in PostgreSQL table 'fastmcp_oauth_state' in database "
+            "'appdb' on db.example.com:5432, tokens signed with JWT_SIGNING_KEY"
+        )
+        assert caplog.text.count(line) == 1
+        assert caplog.text.count("OAuth state in ") == 1
+        assert POSTGRES_PASSWORD not in caplog.text
+        assert "pguser" not in caplog.text
+        assert SIGNING_KEY not in caplog.text
+        storage.open.assert_awaited_once()
+        storage.close.assert_awaited_once()
+
+    async def test_an_unreachable_postgres_names_the_server_not_the_url(self):
+        """Opening a real store against a port nothing listens on: the startup
+        error names the table and server, and never the password."""
+        url = f"postgresql://pguser:{POSTGRES_PASSWORD}@127.0.0.1:1/appdb"
+        with (
+            patch("authsome_mcp_proxy.mcp_proxy.build_inbound_auth"),
+            patch("fastmcp_seaworthy.serve.create_streamable_http_app"),
+            patch("fastmcp_seaworthy.serve.HostRouter"),
+            patch("fastmcp_seaworthy.serve.uvicorn") as uvicorn_mod,
+            pytest.raises(ValueError, match="Cannot use PostgreSQL table") as excinfo,
+        ):
+            await mcp_proxy._serve_http(
+                _fake_server(),
+                _postgres_config(store_postgres_url=url),
+                show_banner=False,
+            )
+
+        uvicorn_mod.Server.assert_not_called()
+        assert "127.0.0.1:1" in str(excinfo.value)
+        assert POSTGRES_PASSWORD not in str(excinfo.value)
+        assert url not in str(excinfo.value)
 
     async def test_default_store_passes_none(self):
         with (

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1@sha256:2780b5c3bab67f1f76c781860de469442999ed1a0d7992a5efdf2cffc0e3d769
 #
 # Multi-stage build for `authsome-mcp-proxy`. The image is intended primarily
-# for the **web connector** deployment (k8s in front of token-validating
+# for the **web mode** deployment (k8s in front of token-validating
 # upstream MCP servers), so the production stage defaults to
 # `--transport http` bound to `0.0.0.0:8000` and exposes port 8000.
 # Operators can override any of those via container env vars (k8s deployment
@@ -20,6 +20,12 @@ WORKDIR /app
 # derive the project version. `python:3.13-slim` doesn't ship `git`, so
 # install it in the builder stage. The production stage doesn't include
 # git — only the resolved venv from this stage is carried forward.
+#
+# TODO(release): git has a second, temporary job here. `uv sync` also runs it
+# to fetch fastmcp-seaworthy, which pyproject.toml's [tool.uv.sources] pins to
+# a Git commit until its next release, so the build needs network access to
+# GitHub. Once that sources entry is gone, drop this paragraph; the install
+# itself stays, for the version lookup above.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*
@@ -84,7 +90,7 @@ ENV PATH="/app/.venv/bin:${PATH}" \
 
 # Web-mode defaults so the image is k8s-deploy-ready out of the box.
 # Override any of these via the container env (k8s deployment manifest or
-# `docker run -e ...`) to run in stdio mode or to change the bind address /
+# `docker run -e ...`) to run in desktop mode or to change the bind address /
 # port.
 ENV MCP_PROXY_TRANSPORT=http \
     MCP_PROXY_HOST=0.0.0.0 \

@@ -1,4 +1,4 @@
-"""Inbound auth provider factory for the web (HTTP) transport.
+"""Inbound auth provider factory for web mode (http transport).
 
 This module dispatches ``WebConfig.inbound_auth_provider`` to the matching FastMCP
 auth provider class. The proxy itself stays IdP-agnostic -- per-IdP quirks
@@ -8,18 +8,21 @@ the FastMCP provider classes -- or, for ZITADEL, in the provider vendored from
 FastMCP in :mod:`authsome_mcp_proxy.zitadel_provider` until a FastMCP release
 ships it.
 
-Two patterns are dispatched here:
+The provider decides which of two roles the proxy takes:
 
-- ``keycloak`` uses ``KeycloakAuthProvider`` (a ``RemoteAuthProvider``):
-  modern Keycloak supports MCP-compatible DCR natively, so the proxy holds
-  no IdP credentials and downstream MCP clients register directly with
-  Keycloak. Lean, but requires Keycloak >= 26.6.0.
-- ``oidc`` / ``aws-cognito`` / ``google`` / ``azure`` / ``zitadel`` use
-  ``OIDCProxy`` (or one of its IdP-specific subclasses) in DCR-bridge mode:
-  the proxy holds a pre-registered static client with the IdP and bridges
-  downstream MCP clients' DCR requests to that IdP's static-client model. Use ``oidc`` as
-  the generic fallback for any OIDC IdP that doesn't support DCR natively
-  (including older Keycloak).
+- **IdP as authorization server**: ``keycloak`` uses
+  ``KeycloakAuthProvider`` (a ``RemoteAuthProvider``). Keycloak lets MCP
+  clients register with it directly, so the proxy holds no IdP credentials
+  and downstream MCP clients register and sign in at Keycloak. Lean, but
+  requires Keycloak >= 26.6.0.
+- **Proxy as authorization server**: ``oidc`` / ``aws-cognito`` /
+  ``google`` / ``azure`` / ``zitadel`` use ``OIDCProxy`` (or one of its
+  IdP-specific subclasses). The proxy holds a pre-registered static client
+  with the IdP and is itself the authorization server for downstream MCP
+  clients, which identify themselves to it by Client ID Metadata Document
+  or Dynamic Client Registration. Use ``oidc`` as the generic fallback for
+  any OIDC IdP that MCP clients cannot register with themselves (including
+  older Keycloak).
 
 ``WebConfig.enable_cimd`` rides along on the ``OIDCProxy`` branches: FastMCP's
 ``OAuthProxy`` implements CIMD (Client ID Metadata Documents) itself, so the
@@ -48,6 +51,11 @@ To add a new IdP:
    ``__post_init__`` validation.
 3. Add a branch to :func:`build_inbound_auth`.
 4. Document required params and add a working example to the README.
+
+The client allowlist (``WebConfig.client_allowlist``) is not applied here but
+by the caller, :func:`authsome_mcp_proxy.mcp_proxy._serve_http`, on each
+provider this function returns: it wraps a built provider rather than
+configuring its construction.
 
 Store backends live in fastmcp-seaworthy. Exposing a new one here takes its
 ``--store-*`` flags in :mod:`authsome_mcp_proxy.__main__`, its fields on
@@ -89,11 +97,11 @@ def build_inbound_auth(
     """Instantiate the FastMCP auth provider matching ``config.inbound_auth_provider``.
 
     The returned provider is passed to FastMCP via the ``auth=`` argument
-    on the server. For DCR-bridge providers (``oidc``/``aws-cognito``/
-    ``google``/``azure``/``zitadel``) it bridges downstream MCP clients' DCR
-    requests to the IdP's static-client model. For ``keycloak`` it sets up token
-    verification + protected-resource-metadata advertising and relies on
-    Keycloak's own DCR.
+    on the server. For ``oidc``/``aws-cognito``/``google``/``azure``/
+    ``zitadel`` it is the authorization server downstream MCP clients register
+    and sign in at, backed by the proxy's one static client at the IdP. For
+    ``keycloak`` it sets up token verification + protected-resource-metadata
+    advertising and leaves registration and sign-in to Keycloak.
 
     Args:
         config: Web-mode configuration. ``WebConfig.__post_init__`` has
@@ -131,7 +139,7 @@ def build_inbound_auth(
     )
 
     if config.inbound_auth_provider == "keycloak":
-        # RemoteAuthProvider: no client_id/secret; MCP client DCRs with Keycloak.
+        # RemoteAuthProvider: no client_id/secret; MCP clients register with Keycloak.
         assert config.issuer_url is not None
         return KeycloakAuthProvider(
             realm_url=config.issuer_url,
@@ -141,8 +149,9 @@ def build_inbound_auth(
         )
 
     if config.inbound_auth_provider == "oidc":
-        # DCR-bridge generic OIDC: derive the discovery URL from the issuer.
-        # Use this for older Keycloak versions and any non-DCR OIDC IdP.
+        # Generic OIDC: derive the discovery URL from the issuer. Use this
+        # for older Keycloak versions and any OIDC IdP that MCP clients cannot
+        # register with themselves.
         assert config.issuer_url is not None
         assert config.client_id is not None
         config_url = f"{config.issuer_url.rstrip('/')}/.well-known/openid-configuration"

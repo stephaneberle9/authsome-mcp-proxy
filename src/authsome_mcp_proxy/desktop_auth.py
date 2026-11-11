@@ -1,5 +1,5 @@
 """
-Outbound auth for desktop (stdio) mode: sign the local user in at an OIDC provider.
+Outbound auth for desktop mode: sign the local user in at an OIDC provider.
 
 Web (http) mode does not use this module; its outbound auth lives in
 :mod:`authsome_mcp_proxy.outbound_auth`.

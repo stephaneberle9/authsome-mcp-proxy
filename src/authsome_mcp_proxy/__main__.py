@@ -10,11 +10,12 @@ This module provides the CLI entry point for running the MCP proxy server. It:
 - Handles graceful shutdown and error reporting
 
 CLI flags fall back to matching environment variables (CLI arguments take
-precedence). For stdio mode the ``OIDC_*`` env vars apply; for http mode
+precedence). For desktop mode the ``OIDC_*`` env vars apply; for web mode
 the inbound provider params (``OIDC_*``, ``COGNITO_*``, ``AZURE_*``,
 ``ZITADEL_*``, ``--audience``, ``--proxy-base-url``, ``ENABLE_CIMD``), the
-OAuth proxy state params (``JWT_SIGNING_KEY``, ``STORE_*``) and the outbound
-mode params (``OUTBOUND_*``) apply.
+OAuth proxy state params (``JWT_SIGNING_KEY``, ``STORE_*``), the client
+allowlist params (``ALLOWED_*``) and the outbound mode params
+(``OUTBOUND_*``) apply.
 """
 
 import argparse
@@ -26,7 +27,7 @@ from typing import cast, get_args
 
 import httpx2
 from exceptiongroup import BaseExceptionGroup
-from fastmcp_seaworthy import StoreBackend, split_base_urls
+from fastmcp_seaworthy import ClientAllowlist, StoreBackend, split_base_urls
 from mcp.shared.exceptions import MCPError
 
 from . import __version__, mcp_proxy
@@ -134,8 +135,8 @@ def cli() -> argparse.Namespace:
     )
 
     # Inbound OIDC options -- used by:
-    # - stdio: the desktop OAuth client (issuer/client/scopes/redirect)
-    # - http: the FastMCP inbound provider when --inbound-auth-provider is
+    # - desktop mode: the OAuth client (issuer/client/scopes/redirect)
+    # - web mode: the FastMCP inbound provider when --inbound-auth-provider is
     #   'oidc'/'keycloak' (issuer_url), or as the OAuth client_id/secret
     #   common across 'oidc'/'aws-cognito'/'google'/'azure'/'zitadel'
     #   (unused for 'keycloak' which is a RemoteAuthProvider).
@@ -156,11 +157,11 @@ def cli() -> argparse.Namespace:
     parser.add_argument(
         "--oidc-scopes",
         help="Space-separated OAuth scopes "
-        "(can also be set via OIDC_SCOPES env var, default for stdio: 'openid profile email')",
+        "(can also be set via OIDC_SCOPES env var, default in desktop mode: 'openid profile email')",
     )
     parser.add_argument(
         "--oidc-redirect-url",
-        help="Localhost URL for OAuth redirect -- stdio mode only "
+        help="Localhost URL for OAuth redirect -- desktop mode only "
         "(can also be set via OIDC_REDIRECT_URL env var, "
         "default: http://localhost:8080/auth/callback)",
     )
@@ -170,17 +171,20 @@ def cli() -> argparse.Namespace:
         "--inbound-auth-provider",
         choices=list(_INBOUND_AUTH_PROVIDERS),
         default=None,
-        help="Inbound auth provider for http mode. 'keycloak' uses FastMCP's "
-        "KeycloakAuthProvider (RemoteAuthProvider -- Keycloak >= 26.6.0 with "
-        "native DCR). 'oidc' uses OIDCProxy in DCR-bridge mode for any "
-        "generic OIDC IdP (including older Keycloak). 'aws-cognito', "
-        "'google', 'azure', 'zitadel' use the matching IdP-specific providers. "
+        help="Inbound auth provider for web mode. 'keycloak' uses FastMCP's "
+        "KeycloakAuthProvider (RemoteAuthProvider -- Keycloak >= 26.6.0): "
+        "MCP clients register and sign in at Keycloak itself, and the proxy "
+        "only verifies its tokens. With every other provider the proxy is the "
+        "authorization server for MCP clients and holds one pre-registered "
+        "client at the IdP: 'oidc' uses OIDCProxy for any generic OIDC IdP "
+        "(including older Keycloak); 'aws-cognito', 'google', 'azure', "
+        "'zitadel' use the matching IdP-specific providers. "
         "Can also be set via INBOUND_AUTH_PROVIDER env var.",
     )
     parser.add_argument(
         "--proxy-base-url",
         default=None,
-        help="Publicly reachable URL of the proxy -- required for http mode "
+        help="Publicly reachable URL of the proxy -- required for web mode "
         "(can also be set via MCP_PROXY_BASE_URL env var). Used by inbound providers to "
         "advertise their authorization/token/JWKS endpoints to downstream MCP "
         "clients via OAuth 2.0 protected-resource metadata. Accepts a "
@@ -261,8 +265,9 @@ def cli() -> argparse.Namespace:
         help="Where the proxy keeps client registrations and users' sessions. "
         "'file' (default): FastMCP's encrypted file store under FASTMCP_HOME, "
         "lost with a container filesystem. 'dynamodb': an AWS DynamoDB table "
-        "shared by every replica (needs the 'dynamodb' extra). Inert for "
-        "--inbound-auth-provider keycloak. "
+        "shared by every replica (needs the 'dynamodb' extra). 'postgres': a "
+        "table in a PostgreSQL database shared by every replica (needs the "
+        "'postgres' extra). Inert for --inbound-auth-provider keycloak. "
         "Can also be set via STORE_BACKEND env var.",
     )
     parser.add_argument(
@@ -286,6 +291,54 @@ def cli() -> argparse.Namespace:
         "default: infrastructure is expected to create it, and a missing table "
         "fails at startup. "
         "Can also be set via STORE_DYNAMODB_AUTO_CREATE env var.",
+    )
+    parser.add_argument(
+        "--store-postgres-url",
+        default=None,
+        help="PostgreSQL connection URL, "
+        "postgresql://user:password@host:5432/database -- required for "
+        "--store-backend postgres. It usually carries the database password, "
+        "and command-line arguments show up in process listings: prefer the "
+        "STORE_POSTGRES_URL env var over this flag. Never logged.",
+    )
+    parser.add_argument(
+        "--store-postgres-table",
+        default=None,
+        help="PostgreSQL table name, optionally schema-qualified as "
+        "schema.table (default: fastmcp_oauth_state) "
+        "(can also be set via STORE_POSTGRES_TABLE env var)",
+    )
+    parser.add_argument(
+        "--store-postgres-auto-create",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Create the PostgreSQL table at startup when it is missing. Off "
+        "by default: migrations are expected to create it, and a missing table "
+        "fails at startup. "
+        "Can also be set via STORE_POSTGRES_AUTO_CREATE env var.",
+    )
+
+    # Web-mode-only client allowlist -- inert for keycloak, like the OAuth
+    # proxy state options above.
+    parser.add_argument(
+        "--allowed-client-ids",
+        default=None,
+        help="The OAuth clients (MCP client software) that may connect, "
+        "separated by commas or whitespace: exact client IDs, or https:// URLs "
+        "ending in '/' that allow every Client ID Metadata Document published "
+        "under them, e.g. 'https://claude.ai/'. Unset, every client is "
+        "accepted. Set, Dynamic Client Registration is turned off. Not applied "
+        "for --inbound-auth-provider keycloak, where Keycloak decides. "
+        "Can also be set via ALLOWED_CLIENT_IDS env var.",
+    )
+    parser.add_argument(
+        "--allowed-upstream-client-redirect-uris",
+        default=None,
+        help="The redirect URIs a client presenting --oidc-client-id itself "
+        "may use, separated by commas or whitespace, e.g. "
+        "'http://localhost:*'. Required when --allowed-client-ids lists "
+        "--oidc-client-id, and applied to that client only. "
+        "Can also be set via ALLOWED_UPSTREAM_CLIENT_REDIRECT_URIS env var.",
     )
 
     # Web-mode-only outbound options
@@ -412,6 +465,13 @@ def _apply_env_fallbacks(args: argparse.Namespace) -> None:
         ("store_backend", "STORE_BACKEND"),
         ("store_dynamodb_table", "STORE_DYNAMODB_TABLE"),
         ("store_dynamodb_region", "STORE_DYNAMODB_REGION"),
+        ("store_postgres_url", "STORE_POSTGRES_URL"),
+        ("store_postgres_table", "STORE_POSTGRES_TABLE"),
+        ("allowed_client_ids", "ALLOWED_CLIENT_IDS"),
+        (
+            "allowed_upstream_client_redirect_uris",
+            "ALLOWED_UPSTREAM_CLIENT_REDIRECT_URIS",
+        ),
         ("outbound_auth", "OUTBOUND_AUTH"),
         ("outbound_client_id", "OUTBOUND_CLIENT_ID"),
         ("outbound_client_secret", "OUTBOUND_CLIENT_SECRET"),
@@ -441,6 +501,10 @@ def _apply_env_fallbacks(args: argparse.Namespace) -> None:
     if args.store_dynamodb_auto_create is None:
         args.store_dynamodb_auto_create = _env_flag(
             "STORE_DYNAMODB_AUTO_CREATE", default=False
+        )
+    if args.store_postgres_auto_create is None:
+        args.store_postgres_auto_create = _env_flag(
+            "STORE_POSTGRES_AUTO_CREATE", default=False
         )
 
 
@@ -477,6 +541,24 @@ def _store_backend(raw: str | None) -> StoreBackend:
             f"STORE_BACKEND must be one of {', '.join(_STORE_BACKENDS)} -- got {raw!r}"
         )
     return cast("StoreBackend", raw)
+
+
+def _client_allowlist(args: argparse.Namespace) -> ClientAllowlist:
+    """Build the client allowlist from the flags, or the env vars behind them.
+
+    Goes through ``ClientAllowlist.from_env`` rather than its constructor so
+    the values are split and checked by fastmcp-seaworthy, the same way as in
+    every other server that reads ``ALLOWED_CLIENT_IDS``. Its errors name the
+    position of a bad entry, which holds for the flag and the env var alike.
+    """
+    return ClientAllowlist.from_env(
+        {
+            "ALLOWED_CLIENT_IDS": args.allowed_client_ids or "",
+            "ALLOWED_UPSTREAM_CLIENT_REDIRECT_URIS": (
+                args.allowed_upstream_client_redirect_uris or ""
+            ),
+        }
+    )
 
 
 def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
@@ -535,6 +617,10 @@ def build_proxy_config(args: argparse.Namespace) -> ProxyConfig:
         store_dynamodb_table=args.store_dynamodb_table,
         store_dynamodb_region=args.store_dynamodb_region,
         store_dynamodb_auto_create=args.store_dynamodb_auto_create,
+        store_postgres_url=args.store_postgres_url,
+        store_postgres_table=args.store_postgres_table,
+        store_postgres_auto_create=args.store_postgres_auto_create,
+        client_allowlist=_client_allowlist(args),
         outbound_auth=args.outbound_auth or "forward",
         outbound_client_id=args.outbound_client_id,
         outbound_client_secret=args.outbound_client_secret,
@@ -559,8 +645,8 @@ class _LowercaseLevelFormatter(logging.Formatter):
 def configure_logging(args):
     """Configure logging based on command line arguments.
 
-    In stdio mode, stdout is reserved for MCP JSON-RPC traffic so logs are
-    forced to stderr. In http mode, stdout is free; logs go to stdout there
+    In desktop mode, stdout is reserved for MCP JSON-RPC traffic so logs are
+    forced to stderr. In web mode, stdout is free; logs go to stdout there
     (more conventional for HTTP server output, especially in containers).
     """
     if args.silent:
@@ -673,7 +759,7 @@ def main():
     Main entry point for the Authsome MCP Proxy application.
 
     Parses configuration, builds the appropriate ProxyConfig (DesktopConfig for
-    stdio mode, WebConfig for http mode), and launches the proxy server. Handles
+    desktop mode, WebConfig for web mode), and launches the proxy server. Handles
     graceful shutdown and provides appropriate error messages for different
     exception types.
 

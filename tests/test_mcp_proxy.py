@@ -11,7 +11,7 @@ from authsome_mcp_proxy.config import DesktopConfig, WebConfig
 from authsome_mcp_proxy.upstream_identity import UpstreamIdentityMiddleware
 
 # ---------------------------------------------------------------------------
-# Desktop (stdio) mode
+# Desktop mode
 # ---------------------------------------------------------------------------
 
 

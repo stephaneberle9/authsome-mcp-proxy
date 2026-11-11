@@ -252,7 +252,7 @@ class TestCLI:
 
 
 class TestCLIWebModeFlags:
-    """Test parsing of the http-mode-only CLI flags + env-var fallbacks."""
+    """Test parsing of the web-mode-only CLI flags + env-var fallbacks."""
 
     def test_inbound_auth_provider_flag(self):
         test_args = [

@@ -29,6 +29,7 @@ import httpx2
 from fastmcp import Client
 from fastmcp.server import create_proxy
 from fastmcp.server.auth.auth import AuthProvider
+from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp_seaworthy import build_client_storage, serve_http
 
 from .config import DesktopConfig, ProxyConfig, WebConfig
@@ -54,11 +55,11 @@ async def run_async(
 
     Args:
         upstream_url: URL of the upstream MCP server to proxy.
-        config: Either a ``DesktopConfig`` (stdio mode) or a ``WebConfig``
-            (http mode). Selects the auth strategy and transport.
+        config: Either a ``DesktopConfig`` (desktop mode) or a ``WebConfig``
+            (web mode). Selects the auth strategy and transport.
         show_banner: Whether to display the server startup banner.
         **transport_kwargs: Additional keyword arguments passed to the
-            transport layer. For stdio: ``log_level``. For http: ``host``,
+            transport layer. In desktop mode: ``log_level``. In web mode: ``host``,
             ``port``, ``log_level``, ``path``, ``uvicorn_config``,
             ``json_response``, ``stateless_http`` / ``stateless``,
             ``middleware``, ``host_origin_protection``, ``allowed_hosts``,
@@ -98,7 +99,7 @@ async def _run_desktop(
     show_banner: bool,
     **transport_kwargs: Any,
 ) -> None:
-    """Run the proxy in stdio mode against an external OIDC IdP."""
+    """Run the proxy in desktop mode against an external OIDC IdP."""
     auth = DesktopOIDCAuth(
         issuer_url=config.issuer_url,
         client_id=config.client_id,
@@ -126,7 +127,7 @@ async def _run_web(
     show_banner: bool,
     **transport_kwargs: Any,
 ) -> None:
-    """Run the proxy in http mode with FastMCP inbound auth + configurable outbound.
+    """Run the proxy in web mode with FastMCP inbound auth + configurable outbound.
 
     One ASGI app is built per entry in ``config.all_proxy_base_urls``, each with
     its own inbound auth provider, and a :class:`~fastmcp_seaworthy.HostRouter`
@@ -193,25 +194,49 @@ async def _serve_http(
     One HTTP client serves every hostname too, for the providers that verify
     each inbound token with a call to the IdP (``google``, ``zitadel``); it is
     closed when serving stops.
+
+    One client allowlist applies to every hostname as well. The upstream IdP
+    only ever sees the proxy's own client, so which MCP client software may
+    connect can be decided nowhere but here -- and a hostname left out would be
+    a way around it, which is why it is applied where each provider is built.
     """
     oauth_state = config.oauth_state
+    client_allowlist = config.client_allowlist
     client_storage = (
         build_client_storage(oauth_state) if oauth_state is not None else None
     )
     if oauth_state is not None:
+        # Once, not per hostname: both are the same for every one of them.
         # Every accepted combination starts a healthy-looking proxy, including
-        # a signing key without a STORE_BACKEND, which stays on the file store.
+        # a signing key without a STORE_BACKEND, which stays on the file store,
+        # and an unset allowlist, which accepts every client.
         logger.info("%s", oauth_state.describe())
+        logger.info("%s", client_allowlist.describe())
+    elif client_allowlist.enabled:
+        # Inert like the store settings, but said out loud: an operator who set
+        # an allowlist expects it to keep clients out.
+        logger.warning(
+            "ALLOWED_CLIENT_IDS is not applied with inbound auth provider %r: "
+            "the IdP is the authorization server there, so limit the clients "
+            "in the IdP",
+            config.inbound_auth_provider,
+        )
 
     async with httpx2.AsyncClient(timeout=10.0) as http_client:
 
         def auth_for(base_url: str) -> AuthProvider:
-            return build_inbound_auth(
+            provider = build_inbound_auth(
                 config,
                 base_url=base_url,
                 client_storage=client_storage,
                 http_client=http_client,
             )
+            # Only where the proxy is the authorization server. Keycloak's
+            # RemoteAuthProvider is not an OAuthProxy: clients register with
+            # Keycloak, and the proxy never sees a client_id to check.
+            if isinstance(provider, OAuthProxy):
+                return client_allowlist.apply(provider)
+            return provider
 
         await serve_http(
             mcp_proxy,

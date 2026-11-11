@@ -2,13 +2,13 @@
 
 Two transports, two config shapes:
 
-- ``DesktopConfig`` -- stdio mode. The proxy runs as a local process launched
+- ``DesktopConfig`` -- desktop mode (stdio transport). The proxy runs as a local process launched
   by the MCP client, performs the OAuth Authorization Code + PKCE flow
   against an external OIDC provider on behalf of the local user, caches
   tokens on disk, and forwards them as Bearer tokens to the upstream MCP
   server. No inbound auth (local trust between MCP client and proxy).
 
-- ``WebConfig`` -- http mode. The proxy runs as a standalone HTTP server.
+- ``WebConfig`` -- web mode (http transport). The proxy runs as a standalone HTTP server.
   Downstream MCP clients (Claude.ai, MCP Inspector, etc.) authenticate
   against the proxy; the proxy bridges that to a configured upstream IdP.
   Outbound auth to the upstream MCP server is independently configurable
@@ -27,27 +27,34 @@ mechanism is used).
 from dataclasses import dataclass, field
 from typing import Literal, TypeAlias
 
-from fastmcp_seaworthy import OAuthStateSettings, StoreBackend, check_distinct_hosts
+from fastmcp_seaworthy import (
+    ClientAllowlist,
+    OAuthStateSettings,
+    StoreBackend,
+    check_distinct_hosts,
+)
 
 AuthProvider: TypeAlias = Literal[
     "oidc", "keycloak", "aws-cognito", "google", "azure", "zitadel"
 ]
 """Inbound auth provider type for web mode.
 
-Two distinct patterns are dispatched:
+The provider decides which of two roles the proxy takes:
 
-- ``keycloak`` -> FastMCP's ``KeycloakAuthProvider`` (a ``RemoteAuthProvider``).
-  Modern Keycloak (>= 26.6.0) supports MCP-compatible Dynamic Client
-  Registration natively, so the proxy holds no IdP credentials of its own;
-  downstream MCP clients DCR directly against Keycloak. The proxy's job
-  reduces to JWT verification + advertising Keycloak as the authorization
-  server via OAuth 2.0 protected-resource metadata.
-- ``oidc`` / ``aws-cognito`` / ``google`` / ``azure`` / ``zitadel`` ->
-  DCR-bridge style (``OIDCProxy`` or one of its IdP-specific subclasses).
-  The proxy holds a pre-registered static ``client_id`` / ``client_secret``
-  with the IdP and bridges downstream MCP clients' DCR requests to the IdP's
-  static-client model. Use ``oidc`` as a fallback for older Keycloak or any generic OIDC
-  IdP.
+- **IdP as authorization server**: ``keycloak`` -> FastMCP's
+  ``KeycloakAuthProvider`` (a ``RemoteAuthProvider``). Keycloak (>= 26.6.0)
+  lets MCP clients register with it directly, so the proxy holds no IdP
+  credentials of its own; downstream MCP clients register and sign in at
+  Keycloak. The proxy's job reduces to JWT verification + advertising
+  Keycloak as the authorization server via OAuth 2.0 protected-resource
+  metadata.
+- **Proxy as authorization server**: ``oidc`` / ``aws-cognito`` / ``google``
+  / ``azure`` / ``zitadel`` -> ``OIDCProxy`` or one of its IdP-specific
+  subclasses. The proxy holds a pre-registered static ``client_id`` /
+  ``client_secret`` with the IdP and is itself the authorization server for
+  downstream MCP clients, which identify themselves to it by Client ID
+  Metadata Document or Dynamic Client Registration. Use ``oidc`` as a
+  fallback for older Keycloak or any generic OIDC IdP.
 """
 
 OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "static"]
@@ -65,7 +72,7 @@ OutboundAuthMode: TypeAlias = Literal["forward", "oauth-client-credentials", "st
 
 @dataclass
 class DesktopConfig:
-    """Configuration for stdio (desktop) transport.
+    """Configuration for desktop mode (stdio transport).
 
     Attributes:
         issuer_url: OIDC issuer URL (e.g.
@@ -86,7 +93,7 @@ class DesktopConfig:
 
 @dataclass
 class WebConfig:
-    """Configuration for http (web connector) transport.
+    """Configuration for web mode (http transport).
 
     Inbound (downstream MCP client -> proxy):
         inbound_auth_provider: Which inbound auth provider to use.
@@ -110,8 +117,8 @@ class WebConfig:
             with the IdP. Empty by default -- single-hostname deployments are
             unaffected.
         client_id: OAuth client ID. Required for ``oidc``, ``aws-cognito``,
-            ``google``, ``azure``, ``zitadel``. Unused for ``keycloak``
-            (DCR-direct).
+            ``google``, ``azure``, ``zitadel``. Unused for ``keycloak``,
+            where MCP clients register with Keycloak directly.
         client_secret: OAuth client secret. Required for ``aws-cognito`` and
             ``zitadel`` (which also authenticates to ZITADEL's token
             introspection endpoint with it); optional for ``oidc`` /
@@ -173,6 +180,24 @@ class WebConfig:
             missing. Off by default, so the proxy needs no
             ``dynamodb:CreateTable`` permission and a missing table fails at
             startup instead of being created with defaults nobody chose.
+        store_postgres_url: PostgreSQL connection URL -- required for
+            ``store_backend='postgres'``. It usually carries the database
+            password, so it is kept out of this class's ``repr()`` and is
+            never logged; fastmcp-seaworthy keeps it out of the startup line
+            and its error messages the same way.
+        store_postgres_table: Table name, optionally schema-qualified as
+            ``schema.table``. Optional; unset, fastmcp-seaworthy's default
+            (``fastmcp_oauth_state``) applies.
+        store_postgres_auto_create: Create the table at startup when it is
+            missing. Off by default, so the proxy's database role needs no
+            ``CREATE`` on the schema and a missing table fails at startup.
+        client_allowlist: The OAuth clients (MCP client software) that may
+            connect, from ``ALLOWED_CLIENT_IDS`` and
+            ``ALLOWED_UPSTREAM_CLIENT_REDIRECT_URIS``. Empty by default, which
+            accepts every client. Applied to every per-hostname provider; with
+            an allowlist, Dynamic Client Registration is off. Like the rest of
+            this group it only means something where the proxy is the
+            authorization server, so it is not applied for ``keycloak``.
 
     Outbound (proxy -> upstream MCP server):
         outbound_auth: Outbound auth mechanism.
@@ -192,7 +217,7 @@ class WebConfig:
             ``outbound_header_name="X-API-Key"``.
 
     Server identity (advertised to downstream MCP clients):
-        In stdio mode the proxy connects once at startup and relays the
+        In desktop mode the proxy connects once at startup and relays the
         upstream's ``serverInfo`` so the proxy appears transparent. In web
         mode that startup relay isn't always possible (``outbound_auth=
         'forward'`` has no inbound session yet), so all fields but the name
@@ -239,6 +264,12 @@ class WebConfig:
     store_dynamodb_table: str | None = None
     store_dynamodb_region: str | None = None
     store_dynamodb_auto_create: bool = False
+    # repr=False: the URL usually carries the database password, and a
+    # dataclass repr ends up in tracebacks, debuggers and debug logs.
+    store_postgres_url: str | None = field(default=None, repr=False)
+    store_postgres_table: str | None = None
+    store_postgres_auto_create: bool = False
+    client_allowlist: ClientAllowlist = field(default_factory=ClientAllowlist)
 
     # outbound
     outbound_auth: OutboundAuthMode = "forward"
@@ -280,6 +311,9 @@ class WebConfig:
             store_dynamodb_table=self.store_dynamodb_table,
             store_dynamodb_region=self.store_dynamodb_region,
             store_dynamodb_auto_create=self.store_dynamodb_auto_create,
+            store_postgres_url=self.store_postgres_url,
+            store_postgres_table=self.store_postgres_table,
+            store_postgres_auto_create=self.store_postgres_auto_create,
         )
 
     def _validate_base_urls(self) -> None:
@@ -297,7 +331,7 @@ class WebConfig:
             if not self.issuer_url:
                 raise ValueError("inbound_auth_provider='keycloak' requires issuer_url")
             # KeycloakAuthProvider is a RemoteAuthProvider: no client_id /
-            # client_secret needed (the MCP client DCRs directly with Keycloak).
+            # client_secret needed (the MCP client registers directly with Keycloak).
         elif self.inbound_auth_provider == "oidc":
             if not self.issuer_url:
                 raise ValueError("inbound_auth_provider='oidc' requires issuer_url")
@@ -374,6 +408,17 @@ class WebConfig:
                 "store_backend='dynamodb' requires store_dynamodb_table "
                 "(STORE_DYNAMODB_TABLE / --store-dynamodb-table)"
             )
+        if self.store_backend == "postgres" and not self.store_postgres_url:
+            raise ValueError(
+                "store_backend='postgres' requires store_postgres_url "
+                "(STORE_POSTGRES_URL)"
+            )
+        # Everything else a backend can refuse -- a malformed PostgreSQL URL or
+        # table name, a signing key that is too short -- is fastmcp-seaworthy's
+        # to judge. Building the settings here makes it fail with the rest of
+        # the configuration rather than when serving starts. Its messages name
+        # the setting and never quote the URL.
+        _ = self.oauth_state
 
     def _validate_outbound(self) -> None:
         if self.outbound_auth == "oauth-client-credentials":
