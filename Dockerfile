@@ -20,12 +20,6 @@ WORKDIR /app
 # derive the project version. `python:3.13-slim` doesn't ship `git`, so
 # install it in the builder stage. The production stage doesn't include
 # git — only the resolved venv from this stage is carried forward.
-#
-# TODO(release): git has a second, temporary job here. `uv sync` also runs it
-# to fetch fastmcp-seaworthy, which pyproject.toml's [tool.uv.sources] pins to
-# a Git commit until its next release, so the build needs network access to
-# GitHub. Once that sources entry is gone, drop this paragraph; the install
-# itself stays, for the version lookup above.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git \
     && rm -rf /var/lib/apt/lists/*

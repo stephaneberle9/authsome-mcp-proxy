@@ -494,9 +494,9 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.9" },
     { name = "exceptiongroup", specifier = ">=1.2.2" },
     { name = "fastmcp", specifier = ">=4.1.0,<5" },
-    { name = "fastmcp-seaworthy", git = "https://github.com/stephaneberle9/fastmcp-seaworthy?rev=492db82ee90033b31b5b4befd89881db1244bd91" },
-    { name = "fastmcp-seaworthy", extras = ["dynamodb"], marker = "extra == 'dynamodb'", git = "https://github.com/stephaneberle9/fastmcp-seaworthy?rev=492db82ee90033b31b5b4befd89881db1244bd91" },
-    { name = "fastmcp-seaworthy", extras = ["postgres"], marker = "extra == 'postgres'", git = "https://github.com/stephaneberle9/fastmcp-seaworthy?rev=492db82ee90033b31b5b4befd89881db1244bd91" },
+    { name = "fastmcp-seaworthy", specifier = ">=0.3.0,<1" },
+    { name = "fastmcp-seaworthy", extras = ["dynamodb"], marker = "extra == 'dynamodb'", specifier = ">=0.3.0,<1" },
+    { name = "fastmcp-seaworthy", extras = ["postgres"], marker = "extra == 'postgres'", specifier = ">=0.3.0,<1" },
     { name = "httpx2", specifier = ">=2.5.0" },
     { name = "mcp", specifier = ">=2.0.0" },
     { name = "py-key-value-aio", extras = ["disk"], specifier = ">=0.3.0" },
@@ -1127,8 +1127,8 @@ wheels = [
 
 [[package]]
 name = "fastmcp-seaworthy"
-version = "0.2.0.post7.dev0+492db82"
-source = { git = "https://github.com/stephaneberle9/fastmcp-seaworthy?rev=492db82ee90033b31b5b4befd89881db1244bd91#492db82ee90033b31b5b4befd89881db1244bd91" }
+version = "0.3.0"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "cryptography" },
     { name = "fastmcp" },
@@ -1137,6 +1137,10 @@ dependencies = [
     { name = "pydantic" },
     { name = "starlette" },
     { name = "uvicorn" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/65/9ad3000e5bcc9bfce42aeee067d1296d7bbfae34eef4c03e13adfe57f04e/fastmcp_seaworthy-0.3.0.tar.gz", hash = "sha256:16a779c1e0dd37729cdabb9e194a5a6dce129a37e9d784c44f285b4228e35472", size = 347128, upload-time = "2026-11-12T16:13:44.954Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/12/ae/2972cd8303133c92dfeaf5935865436251ebc5c7915aa70eef0201ef5803/fastmcp_seaworthy-0.3.0-py3-none-any.whl", hash = "sha256:6ffa9068ad6a004e661c3c778828ea03d0d0adf501d589a6429649bc8942fb17", size = 44624, upload-time = "2026-11-12T16:13:43.725Z" },
 ]
 
 [package.optional-dependencies]

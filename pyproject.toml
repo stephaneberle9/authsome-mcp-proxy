@@ -47,13 +47,11 @@ dependencies = [
     # its API in a minor release, so the ceiling stays below 1 until it is
     # stable.
     #
-    # TODO(release): the floor is stale. The proxy now uses ClientAllowlist
-    # (fastmcp-seaworthy#2) and the PostgreSQL store backend
-    # (fastmcp-seaworthy#3), which no PyPI release carries yet; until one does,
-    # [tool.uv.sources] below resolves this from a pinned Git commit. Once
-    # fastmcp-seaworthy is released, raise the floor here and in the two extras
-    # to that release and delete the sources entry.
-    "fastmcp-seaworthy>=0.2,<1",
+    # 0.3.0 is the first release with ClientAllowlist (fastmcp-seaworthy#2) and
+    # the PostgreSQL store backend (fastmcp-seaworthy#3). __main__ imports
+    # ClientAllowlist at module level, so 0.2.x would turn every entry point
+    # into an ImportError.
+    "fastmcp-seaworthy>=0.3.0,<1",
     "py-key-value-aio[disk]>=0.3.0",
     # Arrives transitively via fastmcp, but desktop mode imports it directly to
     # serve the local OAuth callback. Declared so a future fastmcp that stops
@@ -81,12 +79,11 @@ dependencies = [
 # the default file store pulls in no cloud SDK; fastmcp-seaworthy imports the
 # backend's store class only when it is selected.
 dynamodb = [
-    "fastmcp-seaworthy[dynamodb]>=0.2,<1",
+    "fastmcp-seaworthy[dynamodb]>=0.3.0,<1",
 ]
 postgres = [
-    # TODO(release): no PyPI release of fastmcp-seaworthy has the postgres
-    # extra yet; raise this floor together with the one above.
-    "fastmcp-seaworthy[postgres]>=0.2,<1",
+    # fastmcp-seaworthy has the postgres extra since 0.3.0.
+    "fastmcp-seaworthy[postgres]>=0.3.0,<1",
 ]
 
 [dependency-groups]
@@ -144,17 +141,6 @@ exclude = [
 
 [tool.uv]
 default-groups = ["dev", "test"]
-
-[tool.uv.sources]
-# TODO(release): temporary. Resolves fastmcp-seaworthy -- the plain dependency
-# and its [dynamodb] and [postgres] extras alike -- from a pinned commit on its
-# main branch, which has ClientAllowlist (fastmcp-seaworthy#2) and the
-# PostgreSQL store backend (fastmcp-seaworthy#3) ahead of a release. A commit
-# rather than a branch, so uv.lock stays reproducible. This table never reaches
-# the wheel, so a published authsome-mcp-proxy would still resolve the PyPI
-# release its floor allows: delete this entry once fastmcp-seaworthy is
-# released and the floors above name that release.
-fastmcp-seaworthy = { git = "https://github.com/stephaneberle9/fastmcp-seaworthy", rev = "492db82ee90033b31b5b4befd89881db1244bd91" }
 
 [tool.deptry]
 # These are regexes, not globs. "*.log" is an invalid regex ("repetition
